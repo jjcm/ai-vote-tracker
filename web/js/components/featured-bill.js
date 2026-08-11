@@ -1,5 +1,5 @@
 import { api, escapeHTML, formatDateLong, cleanTitle } from '../api.js';
-import { capitol } from '../icons.js';
+import { capitol, info } from '../icons.js';
 
 /**
  * The homepage hero card: chamber kicker, bill title, status line, summary,
@@ -65,7 +65,8 @@ class FeaturedBill extends HTMLElement {
           <p class="verdicts__heading"><span>AI Vote Verdicts</span></p>
           <div class="verdicts__grid" data-count="${bill.votes.length}"></div>
         </div>
-      </article>`;
+      </article>
+      ${pipelineNotice(data.pipeline)}`;
 
     const grid = this.querySelector('.verdicts__grid');
     bill.votes.forEach((vote) => {
@@ -74,6 +75,15 @@ class FeaturedBill extends HTMLElement {
       grid.appendChild(card);
     });
   }
+}
+
+/** Explains an empty verdict panel rather than leaving five ellipses. */
+function pipelineNotice(pipeline) {
+  if (!pipeline || pipeline.votingEnabled) return '';
+  return `<p class="notice">
+      <span class="notice__icon" aria-hidden="true">${info(18)}</span>
+      <span>No verdicts yet: set <code>OPENROUTER_KEY</code> in <code>.env</code> and restart the server to collect votes.</span>
+    </p>`;
 }
 
 function skeleton() {

@@ -191,7 +191,7 @@ class BillsBrowser extends HTMLElement {
       <p class="pagination__count">Showing ${from} to ${to} of ${data.total} bill${data.total === 1 ? '' : 's'}</p>
       <div class="pagination__pages">
         <button class="page-btn" data-page="${data.page - 1}" ${data.page <= 1 ? 'disabled' : ''} aria-label="Previous page">
-          <span class="flip">${chevron(13)}</span>
+          <span class="flip">${chevron(15)}</span>
         </button>
         ${pages
           .map((p) =>
@@ -202,7 +202,7 @@ class BillsBrowser extends HTMLElement {
           .join('')}
         <button class="page-btn" data-page="${data.page + 1}" ${
           data.page >= data.totalPages ? 'disabled' : ''
-        } aria-label="Next page">${chevron(13)}</button>
+        } aria-label="Next page">${chevron(15)}</button>
       </div>`;
 
     el.querySelectorAll('[data-page]').forEach((btn) => {
@@ -241,10 +241,10 @@ function detailRow(bill, columns) {
       <td class="col-updated">${formatDate(bill.updatedAt)}</td>
       <td class="col-go">${
         href === '#'
-          ? `<span class="row-go" aria-hidden="true">${chevron(13)}</span>`
+          ? `<span class="row-go" aria-hidden="true">${chevron(15)}</span>`
           : `<a class="row-go" href="${escapeHTML(href)}" rel="noopener" aria-label="Open ${escapeHTML(
               bill.number
-            )} on congress.gov">${chevron(13)}</a>`
+            )} on congress.gov">${chevron(15)}</a>`
       }</td>
     </tr>`;
 }

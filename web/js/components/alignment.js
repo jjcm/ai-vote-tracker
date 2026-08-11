@@ -102,7 +102,7 @@ function snapshotCard(m) {
   return `
     <article class="snapshot snapshot--${m.tone}">
       <header class="snapshot__head">
-        <span class="snapshot__icon">${modelMark(m.key, 22)}</span>
+        <span class="snapshot__icon">${modelMark(m.key, 26)}</span>
         <h3 class="snapshot__name">${escapeHTML(m.name)}</h3>
       </header>
       <p class="snapshot__label">Position Score</p>
@@ -168,7 +168,7 @@ function agreementPanel(data) {
                   (m) =>
                     `<th scope="col" class="col-vote"><span class="agreement__model">${modelMark(
                       m.key,
-                      15
+                      17
                     )}${escapeHTML(m.name)}</span></th>`
                 )
                 .join('')}

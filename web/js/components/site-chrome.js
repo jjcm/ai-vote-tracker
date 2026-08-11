@@ -32,7 +32,7 @@ class SiteHeader extends HTMLElement {
               )
               .join('')}
           </nav>
-          <span class="masthead__seal">${laurel(58)}</span>
+          <span class="masthead__seal">${laurel(66)}</span>
         </div>
       </header>
       <div class="masthead-rules" aria-hidden="true">
