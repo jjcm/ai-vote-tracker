@@ -44,10 +44,10 @@ type ModelAlignment struct {
 
 // Result is the full alignment payload.
 type Result struct {
-	Models     []ModelAlignment       `json:"models"`
-	Bands      []Band                 `json:"bands"`
-	Bills      []models.BillWithVotes `json:"bills"`
-	BillsScored int                   `json:"billsScored"`
+	Models      []ModelAlignment       `json:"models"`
+	Bands       []Band                 `json:"bands"`
+	Bills       []models.BillWithVotes `json:"bills"`
+	BillsScored int                    `json:"billsScored"`
 }
 
 // Compute derives every model's alignment from the supplied bills. A model's
