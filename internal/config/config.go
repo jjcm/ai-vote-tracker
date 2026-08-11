@@ -51,7 +51,10 @@ func Load() (*Config, error) {
 		SiteURL:          envStr("SITE_URL", ""),
 		BootstrapBills:   envInt("BOOTSTRAP_BILLS", 12),
 		RequestTimeout:   time.Duration(envInt("MODEL_TIMEOUT_SECONDS", 90)) * time.Second,
-		BootstrapTimeout: time.Duration(envInt("BOOTSTRAP_TIMEOUT_SECONDS", 120)) * time.Second,
+		// A round is now at least two calls per model, and more when a bill has
+		// to be digested section by section, so the featured bill needs longer
+		// than a single completion's worth of patience.
+		BootstrapTimeout: time.Duration(envInt("BOOTSTRAP_TIMEOUT_SECONDS", 240)) * time.Second,
 
 		ContextBudgetRatio: envFloat("CONTEXT_BUDGET_RATIO", 0.75),
 		ContextTokens:      envInt("MODEL_CONTEXT_TOKENS", 0),

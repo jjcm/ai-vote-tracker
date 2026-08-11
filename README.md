@@ -41,7 +41,7 @@ Read from `.env` (gitignored) or the process environment.
 | `BOOTSTRAP_BILLS` | `12` | How many live bills to pull from Congress.gov. |
 | `WEB_DIR` | *(unset)* | Serve `web/` from disk instead of the embedded copy, for frontend iteration. |
 | `MODEL_TIMEOUT_SECONDS` | `90` | Per-model request timeout. |
-| `BOOTSTRAP_TIMEOUT_SECONDS` | `120` | How long startup waits for the featured bill's verdicts. |
+| `BOOTSTRAP_TIMEOUT_SECONDS` | `240` | How long startup waits for the featured bill's verdicts. A round is at least two calls per model, and more when a bill has to be digested. |
 | `CONTEXT_BUDGET_RATIO` | `0.75` | Share of a model's context window that statute text may fill before the bill is read section by section. |
 | `MODEL_CONTEXT_TOKENS` | *(unset)* | Overrides every model's context window. For exercising the section-digest path without an omnibus-sized bill. |
 
