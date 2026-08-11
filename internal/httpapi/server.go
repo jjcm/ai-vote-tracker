@@ -166,7 +166,7 @@ func (s *Server) handleBills(w http.ResponseWriter, r *http.Request) {
 
 	statuses := statusOptions(all)
 	writeJSON(w, http.StatusOK, billsResponse{
-		Bills:      filtered[start:end],
+		Bills:      withoutMemos(filtered[start:end]),
 		Total:      len(filtered),
 		Page:       page,
 		PerPage:    perPage,
@@ -194,11 +194,18 @@ func (s *Server) handleBill(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	// Bill XML runs to megabytes, so the statute text is opt-in rather than the
+	// default payload for a page that only needs the verdicts.
+	textChars := len(decorated[0].FullText)
+	if r.URL.Query().Get("text") != "true" {
+		decorated[0].FullText = ""
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"bill":     decorated[0],
-		"voting":   s.votes.IsRunning(bill.ID),
-		"models":   models.Catalog,
-		"pipeline": s.votes.Status(),
+		"bill":      decorated[0],
+		"textChars": textChars,
+		"voting":    s.votes.IsRunning(bill.ID),
+		"models":    models.Catalog,
+		"pipeline":  s.votes.Status(),
 	})
 }
 
@@ -322,6 +329,23 @@ func (s *Server) loadAll(ctx context.Context) ([]models.BillWithVotes, error) {
 		decorated[i].FullText = ""
 	}
 	return decorated, nil
+}
+
+// withoutMemos drops the pros and cons from a listing payload. The browse table
+// only renders vote glyphs, and five memos per row for a hundred rows is a lot
+// of JSON nobody reads.
+func withoutMemos(bills []models.BillWithVotes) []models.BillWithVotes {
+	out := make([]models.BillWithVotes, len(bills))
+	for i, b := range bills {
+		votes := make([]models.Vote, len(b.Votes))
+		for j, v := range b.Votes {
+			v.Pros, v.Cons = nil, nil
+			votes[j] = v
+		}
+		b.Votes = votes
+		out[i] = b
+	}
+	return out
 }
 
 func matches(b models.BillWithVotes, q string) bool {

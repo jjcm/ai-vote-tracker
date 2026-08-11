@@ -40,19 +40,28 @@ func run(logger *log.Logger) error {
 		return err
 	}
 
-	st, err := store.Open(cfg.DatabasePath)
+	st, discarded, err := store.OpenWithMigration(cfg.DatabasePath)
 	if err != nil {
 		return err
 	}
 	defer st.Close()
+	if discarded > 0 {
+		logger.Printf("schema migration dropped %d verdict(s) cast on bill summaries; the corpus will be re-read as statute text", discarded)
+	}
 
 	siteURL := cfg.SiteURL
 	if siteURL == "" {
 		siteURL = "http://" + cfg.Addr()
 	}
-	router := openrouter.New(cfg.OpenRouterURL, cfg.OpenRouterKey, siteURL, cfg.RequestTimeout)
-	cg := congress.New(cfg.CongressBaseURL, cfg.CongressAPIKey)
+	router := openrouter.New(cfg.OpenRouterURL, cfg.OpenRouterKey, siteURL, cfg.RequestTimeout).
+		WithLogger(logger).
+		WithContextBudget(cfg.ContextBudgetRatio, cfg.ContextTokens)
+	cg := congress.New(cfg.CongressBaseURL, cfg.CongressAPIKey).WithLogger(logger)
 	svc := votes.New(st, router, cg, cfg.BootstrapBills, logger)
+
+	if cfg.ContextTokens > 0 {
+		logger.Printf("MODEL_CONTEXT_TOKENS=%d overrides every model's context window", cfg.ContextTokens)
+	}
 
 	if !cfg.HasOpenRouter() {
 		logger.Printf("warning: OPENROUTER_KEY is not set — the site will render but every verdict stays pending")

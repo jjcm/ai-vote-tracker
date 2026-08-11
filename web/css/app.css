@@ -528,6 +528,57 @@ main {
   text-wrap: pretty;
 }
 
+/* The pros and cons the model wrote before voting, folded away by default. */
+.verdict__memo {
+  margin: 1.1rem auto 0;
+  max-width: 24ch;
+  text-align: left;
+}
+
+.verdict__memo > summary {
+  font-family: var(--font-sans);
+  font-size: 0.6875rem;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+  text-align: center;
+  cursor: pointer;
+  list-style: none;
+}
+
+.verdict__memo > summary::-webkit-details-marker {
+  display: none;
+}
+
+.verdict__memo > summary:hover,
+.verdict__memo[open] > summary {
+  color: var(--ink-soft);
+}
+
+.verdict__memo-heading {
+  font-family: var(--font-sans);
+  font-size: 0.625rem;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+  margin: 0.9rem 0 0.3rem;
+}
+
+.verdict__memo-list {
+  margin: 0;
+  padding-left: 1.05rem;
+  font-family: var(--font-serif);
+  font-size: 0.875rem;
+  line-height: 1.45;
+  color: var(--ink-soft);
+}
+
+.verdict__memo-list li + li {
+  margin-top: 0.35rem;
+}
+
 /* --------------------------------------------------------------- tables */
 
 .table-wrap {

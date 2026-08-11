@@ -93,8 +93,34 @@ class ModelVoteCard extends HTMLElement {
       </div>
       <p class="verdict__value">${verdict}</p>
       <span class="verdict__star" aria-hidden="true"></span>
-      <p class="verdict__reason">${escapeHTML(reason)}</p>`;
+      <p class="verdict__reason">${escapeHTML(reason)}</p>
+      ${memo(v)}`;
   }
+}
+
+/**
+ * The pros and cons this model wrote for itself before voting, folded away
+ * until asked for. The verdict sentence is the headline; this is the working.
+ */
+function memo(vote) {
+  const pros = vote.pros || [];
+  const cons = vote.cons || [];
+  if (!pros.length && !cons.length) return '';
+  return `
+    <details class="verdict__memo">
+      <summary>Its reasoning</summary>
+      ${list('For', pros)}
+      ${list('Against', cons)}
+    </details>`;
+}
+
+function list(heading, entries) {
+  if (!entries.length) return '';
+  return `
+    <p class="verdict__memo-heading">${heading}</p>
+    <ul class="verdict__memo-list">
+      ${entries.map((e) => `<li>${escapeHTML(e)}</li>`).join('')}
+    </ul>`;
 }
 
 customElements.define('vote-badge', VoteBadge);

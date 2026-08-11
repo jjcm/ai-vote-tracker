@@ -26,6 +26,12 @@ type Config struct {
 	BootstrapBills   int
 	RequestTimeout   time.Duration
 	BootstrapTimeout time.Duration
+	// ContextBudgetRatio is the share of a model's context window that statute
+	// text may fill before the bill is read section by section instead.
+	ContextBudgetRatio float64
+	// ContextTokens overrides every model's context window. It exists to
+	// exercise the section-digest path without an omnibus-sized bill.
+	ContextTokens int
 }
 
 // Load reads .env (if present) and then the process environment.
@@ -46,10 +52,16 @@ func Load() (*Config, error) {
 		BootstrapBills:   envInt("BOOTSTRAP_BILLS", 12),
 		RequestTimeout:   time.Duration(envInt("MODEL_TIMEOUT_SECONDS", 90)) * time.Second,
 		BootstrapTimeout: time.Duration(envInt("BOOTSTRAP_TIMEOUT_SECONDS", 120)) * time.Second,
+
+		ContextBudgetRatio: envFloat("CONTEXT_BUDGET_RATIO", 0.75),
+		ContextTokens:      envInt("MODEL_CONTEXT_TOKENS", 0),
 	}
 
 	if cfg.Port < 1 || cfg.Port > 65535 {
 		return nil, fmt.Errorf("PORT must be between 1 and 65535, got %d", cfg.Port)
+	}
+	if cfg.ContextBudgetRatio <= 0 || cfg.ContextBudgetRatio > 1 {
+		return nil, fmt.Errorf("CONTEXT_BUDGET_RATIO must be between 0 and 1, got %v", cfg.ContextBudgetRatio)
 	}
 	cfg.OpenRouterURL = strings.TrimRight(cfg.OpenRouterURL, "/")
 	cfg.CongressBaseURL = strings.TrimRight(cfg.CongressBaseURL, "/")
@@ -82,4 +94,16 @@ func envInt(key string, fallback int) int {
 		return fallback
 	}
 	return n
+}
+
+func envFloat(key string, fallback float64) float64 {
+	v := strings.TrimSpace(os.Getenv(key))
+	if v == "" {
+		return fallback
+	}
+	f, err := strconv.ParseFloat(v, 64)
+	if err != nil {
+		return fallback
+	}
+	return f
 }

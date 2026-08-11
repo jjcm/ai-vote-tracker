@@ -1,9 +1,11 @@
 // Command mockrouter is a development-only stand-in for the OpenRouter chat
-// completions API. It lets you exercise the full voting pipeline — parallel
-// calls, JSON parsing, caching, refresh — without an API key or a bill.
+// completions API. It lets you exercise the full pipeline — section digests,
+// pros and cons memos, parallel votes, JSON parsing, caching, refresh —
+// without an API key or a bill.
 //
-// It is NOT a substitute for real model output: verdicts are derived from a
-// hash of the bill and model name, so anything it produces is fake.
+// It is NOT a substitute for real model output: everything it returns is
+// derived from a hash of the bill and model name, so anything it produces is
+// fake.
 //
 //	go run ./cmd/mockrouter &
 //	OPENROUTER_KEY=dev OPENROUTER_BASE_URL=http://127.0.0.1:8500/api/v1 go run ./cmd/server
@@ -45,6 +47,22 @@ var noReasons = []string{
 	"Worthwhile goals, but the authorities granted here are broader than the problem requires.",
 }
 
+var pros = []string{
+	"Sec. 2 pairs the mandate with real implementation funding.",
+	"Sec. 4 leaves existing state authority intact.",
+	"Sec. 6 sets deadlines an agency can actually meet.",
+	"Sec. 7 requires an annual report Congress can audit.",
+	"Sec. 8 sunsets the new authority rather than making it permanent.",
+}
+
+var cons = []string{
+	"Sec. 3 leaves the key threshold undefined, which invites litigation.",
+	"Sec. 5 preempts state experimentation before the federal approach is tested.",
+	"The authorization in Sec. 2 is unoffset and grows every year.",
+	"Compliance costs in Sec. 4 fall hardest on the smallest covered entities.",
+	"Sec. 6 sets a deadline with no consequence for missing it.",
+}
+
 func main() {
 	addr := flag.String("addr", "127.0.0.1:8500", "listen address")
 	delay := flag.Duration("delay", 400*time.Millisecond, "simulated per-call latency")
@@ -70,10 +88,19 @@ func main() {
 
 		seed := hash(req.Model + "|" + firstLine(user))
 		var content string
-		if strings.Contains(system, "ideological direction") {
+		// The stage is read off the system prompt, and the floor vote is
+		// checked first because its prompt also refers to the memo.
+		switch {
+		case strings.Contains(system, "ideological direction"):
 			score := float64(seed%201)/100 - 1
 			content = fmt.Sprintf(`{"score": %.2f, "reason": "Mock ideology score."}`, score)
-		} else {
+
+		case strings.Contains(system, "SECTION NOTE"):
+			content = fmt.Sprintf(`{"note": %q}`, fmt.Sprintf(
+				"Mock note on %s: authorizes appropriations, sets a compliance deadline, and directs an annual report.",
+				partLabel(user)))
+
+		case strings.Contains(system, "recorded floor vote"):
 			vote := "Yes"
 			reasons := yesReasons
 			if seed%100 < 38 {
@@ -81,6 +108,17 @@ func main() {
 				reasons = noReasons
 			}
 			content = fmt.Sprintf(`{"vote": %q, "reason": %q}`, vote, reasons[seed%uint32(len(reasons))])
+
+		case strings.Contains(system, "pros and cons memo"):
+			content = fmt.Sprintf(`{"pros": [%q, %q, %q], "cons": [%q, %q]}`,
+				pros[seed%uint32(len(pros))],
+				pros[(seed+1)%uint32(len(pros))],
+				pros[(seed+2)%uint32(len(pros))],
+				cons[seed%uint32(len(cons))],
+				cons[(seed+1)%uint32(len(cons))])
+
+		default:
+			content = `{"error": "mockrouter: unrecognised prompt"}`
 		}
 
 		w.Header().Set("Content-Type", "application/json")
@@ -106,4 +144,15 @@ func firstLine(s string) string {
 		return s[:i]
 	}
 	return s
+}
+
+// partLabel echoes back which piece of a split bill the note is about, so the
+// digest reads like notes on a real bill rather than five identical lines.
+func partLabel(user string) string {
+	for _, line := range strings.Split(user, "\n") {
+		if strings.HasPrefix(line, "PART ") {
+			return strings.TrimSpace(line)
+		}
+	}
+	return "this part"
 }
