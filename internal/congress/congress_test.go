@@ -62,6 +62,13 @@ func newStub(t *testing.T, textVersions string) (*Client, *stub) {
 			  "bill":{"congress":119,"number":"1264","originChamber":"Senate","type":"S",
 			  "title":"Border Security and Asylum Reform Act of 2025"}}]}`,
 				strings.Repeat("This bill strengthens border security measures. ", 5))
+		case strings.HasSuffix(r.URL.Path, "/summaries"):
+			// The per-bill feed, which is what a bill fetched by identifier
+			// reads. It opens with the same title echo as the global one.
+			fmt.Fprintf(w, `{"summaries":[
+			  {"actionDate":"2025-04-02","text":"<p>An older summary nobody should read.</p>","updateDate":"2025-04-03T00:00:00Z"},
+			  {"actionDate":"2025-05-01","text":"<p><b>Border Security and Asylum Reform Act of 2025</b></p><p>%s</p>","updateDate":"2025-05-08T00:00:00Z"}]}`,
+				strings.Repeat("This bill strengthens border security measures. ", 5))
 		case strings.HasSuffix(r.URL.Path, "/text"):
 			fmt.Fprint(w, s.textVersions)
 		case strings.HasSuffix(r.URL.Path, ".xml"):
@@ -72,6 +79,7 @@ func newStub(t *testing.T, textVersions string) (*Client, *stub) {
 			http.Error(w, "not text", http.StatusNotFound)
 		default:
 			fmt.Fprint(w, `{"bill":{"introducedDate":"2025-04-02","latestAction":{"text":"Read twice and referred to committee"},
+			  "title":"Border Security and Asylum Reform Act of 2025","updateDate":"2025-05-08T00:00:00Z",
 			  "policyArea":{"name":"Immigration"},"sponsors":[{"fullName":"Sen. Marshall, Roger [R-KS]","party":"R"}]}}`)
 		}
 	}))
@@ -278,5 +286,58 @@ func TestBlankUserAgentKeepsTheDefault(t *testing.T) {
 		if agent != DefaultUserAgent {
 			t.Errorf("%s user agent = %q, want the default to survive a blank override", path, agent)
 		}
+	}
+}
+
+// Bills named by identifier — the ones that reached a floor vote — are read
+// the same way as the ones the summaries feed names, statute text and all.
+func TestBillsByIDReadsTheStatuteText(t *testing.T) {
+	c, s := newStub(t, `{"textVersions":[{"type":"Reported in Senate","date":"2025-05-01T04:00:00Z",
+	  "formats":[{"type":"Formatted XML","url":"{{base}}/119/bills/s1264/BILLS-119s1264rs.xml"}]}]}`)
+
+	bills, err := c.BillsByID(context.Background(), []string{"s-1264-119", "s-1264-119", "not-a-bill"})
+	if err != nil {
+		t.Fatalf("BillsByID: %v", err)
+	}
+	if len(bills) != 1 {
+		t.Fatalf("got %d bills, want one: a repeated id is fetched once and a malformed one is skipped", len(bills))
+	}
+
+	b := bills[0]
+	if b.ID != "s-1264-119" || b.Number != "S. 1264" || b.Chamber != models.ChamberSenate {
+		t.Errorf("identity = %q / %q / %q", b.ID, b.Number, b.Chamber)
+	}
+	if b.TextSource != models.TextSourceCongressXML || !strings.Contains(b.FullText, "<section") {
+		t.Errorf("statute text = %q (%s)", clip(b.FullText), b.TextSource)
+	}
+	if b.Sponsor == "" || b.PolicyArea != "Immigration" || b.Status == "" {
+		t.Errorf("the bill detail was not merged in: %+v", b)
+	}
+	if s.seenAgents()["/bill/119/s/1264/summaries"] == "" {
+		t.Errorf("the per-bill summary feed was never read: %v", s.seenAgents())
+	}
+}
+
+// The summary is cleaned before it is clipped, on this path as on the feed
+// path: the card prints the title directly above it, so a summary that opens
+// by restating the title spends the card's budget on a repeat of the headline.
+func TestBillsByIDDropsTheSummaryTitleEcho(t *testing.T) {
+	c, _ := newStub(t, `{"textVersions":[{"type":"Reported in Senate","date":"2025-05-01T04:00:00Z",
+	  "formats":[{"type":"Formatted XML","url":"{{base}}/119/bills/s1264/BILLS-119s1264rs.xml"}]}]}`)
+
+	bills, err := c.BillsByID(context.Background(), []string{"s-1264-119"})
+	if err != nil || len(bills) != 1 {
+		t.Fatalf("BillsByID: %v (%d bills)", err, len(bills))
+	}
+	summary := bills[0].Summary
+	if strings.HasPrefix(summary, bills[0].Title) {
+		t.Errorf("the summary still opens by repeating the title: %q", clip(summary))
+	}
+	if !strings.HasPrefix(summary, "This bill strengthens") {
+		t.Errorf("summary = %q", clip(summary))
+	}
+	// The newest summary wins; the superseded one is not what the card shows.
+	if strings.Contains(summary, "older summary") {
+		t.Errorf("an out-of-date summary was used: %q", clip(summary))
 	}
 }

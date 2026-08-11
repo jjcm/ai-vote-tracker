@@ -396,12 +396,16 @@ func (c *Client) billByNumber(ctx context.Context, congress int, billType, numbe
 	if strings.EqualFold(billType, "S") {
 		chamber, display = models.ChamberSenate, "S. "+number
 	}
+	// As in the feed path: the CRS summary opens by restating the short title
+	// the card prints above it, and that echo is dropped before clipping so the
+	// card's character budget goes to the summary.
+	summary := models.SummaryWithoutTitleEcho(title, c.latestSummary(ctx, congress, billType, number))
 	bill := models.Bill{
 		ID:             fmt.Sprintf("%s-%s-%d", strings.ToLower(billType), number, congress),
 		Number:         display,
 		Title:          title,
 		Chamber:        chamber,
-		Summary:        shorten(c.latestSummary(ctx, congress, billType, number), 460),
+		Summary:        shorten(summary, 460),
 		FullText:       text.Text,
 		TextSource:     text.Source,
 		TextFormat:     text.Format,
