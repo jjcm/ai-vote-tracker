@@ -198,6 +198,24 @@ ON CONFLICT(bill_id, model_key) DO UPDATE SET
 	return err
 }
 
+// PurgeMalformedVotes drops verdicts whose rationale still carries the response
+// envelope, which an earlier parsing bug could store. Removing them puts the
+// (bill, model) pair back in the missing set so the next round re-collects it.
+func (s *Store) PurgeMalformedVotes(ctx context.Context) (int, error) {
+	res, err := s.db.ExecContext(ctx, `
+DELETE FROM votes
+WHERE reason LIKE ?
+   OR reason LIKE ?
+   OR reason LIKE ?
+   OR reason LIKE ?`,
+		"{%", `%"vote"%`, `%"reason"%`, "%```%")
+	if err != nil {
+		return 0, err
+	}
+	n, err := res.RowsAffected()
+	return int(n), err
+}
+
 // DeleteVotes clears all recorded verdicts for a bill.
 func (s *Store) DeleteVotes(ctx context.Context, billID string) error {
 	_, err := s.db.ExecContext(ctx, `DELETE FROM votes WHERE bill_id = ?`, billID)
