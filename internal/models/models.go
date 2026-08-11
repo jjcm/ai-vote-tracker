@@ -3,6 +3,8 @@
 package models
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"strings"
 	"time"
 )
@@ -12,16 +14,20 @@ type Model struct {
 	Key          string `json:"key"`
 	Name         string `json:"name"`
 	OpenRouterID string `json:"openRouterId"`
+	// ContextTokens is the model's advertised context window. Statute text
+	// larger than a fraction of it has to be digested section by section
+	// before the model can deliberate on it.
+	ContextTokens int `json:"contextTokens"`
 }
 
 // Catalog is the fixed, ordered list of models shown across the site. Display
 // order matches the vote columns in the design.
 var Catalog = []Model{
-	{Key: "opus", Name: "Opus", OpenRouterID: "anthropic/claude-opus-5"},
-	{Key: "grok", Name: "Grok", OpenRouterID: "x-ai/grok-4.5"},
-	{Key: "gpt-sol", Name: "GPT Sol", OpenRouterID: "openai/gpt-5.6-sol"},
-	{Key: "deepseek", Name: "DeepSeek", OpenRouterID: "deepseek/deepseek-v4-pro"},
-	{Key: "gemini", Name: "Gemini", OpenRouterID: "google/gemini-3.6-flash"},
+	{Key: "opus", Name: "Opus", OpenRouterID: "anthropic/claude-opus-5", ContextTokens: 1_000_000},
+	{Key: "grok", Name: "Grok", OpenRouterID: "x-ai/grok-4.5", ContextTokens: 500_000},
+	{Key: "gpt-sol", Name: "GPT Sol", OpenRouterID: "openai/gpt-5.6-sol", ContextTokens: 1_050_000},
+	{Key: "deepseek", Name: "DeepSeek", OpenRouterID: "deepseek/deepseek-v4-pro", ContextTokens: 1_048_576},
+	{Key: "gemini", Name: "Gemini", OpenRouterID: "google/gemini-3.6-flash", ContextTokens: 1_048_576},
 }
 
 // ModelByKey looks up a catalog entry.
@@ -64,7 +70,19 @@ const (
 	SourceCongress = "congress.gov"
 )
 
-// Bill is a single piece of legislation under review.
+// Text sources. The models only ever deliberate on statute text, so a bill
+// whose text never arrived is not put to a vote. TextSourceSummary describes
+// rows written by builds that fed the CRS summary to the models instead.
+const (
+	TextSourceCongressXML  = "congress-xml"
+	TextSourceCongressHTML = "congress-text"
+	TextSourceSeedXML      = "seed-xml"
+	TextSourceSummary      = "crs-summary"
+)
+
+// Bill is a single piece of legislation under review. FullText holds the
+// statute text itself — the bill XML published by Congress.gov where it is
+// available — which is the only evidence the models are given.
 type Bill struct {
 	ID             string    `json:"id"`
 	Number         string    `json:"number"`
@@ -77,6 +95,10 @@ type Bill struct {
 	SponsorParty   string    `json:"sponsorParty,omitempty"`
 	Summary        string    `json:"summary"`
 	FullText       string    `json:"fullText,omitempty"`
+	TextSource     string    `json:"textSource,omitempty"`
+	TextFormat     string    `json:"textFormat,omitempty"`
+	TextVersion    string    `json:"textVersion,omitempty"`
+	TextURL        string    `json:"textUrl,omitempty"`
 	IdeologyScore  float64   `json:"ideologyScore"`
 	Source         string    `json:"source"`
 	SourceURL      string    `json:"sourceUrl,omitempty"`
@@ -84,7 +106,28 @@ type Bill struct {
 	UpdatedAt      time.Time `json:"updatedAt"`
 }
 
-// Vote is one model's verdict on one bill.
+// HasStatuteText reports whether the bill carries text a model may vote on. A
+// CRS summary does not qualify.
+func (b Bill) HasStatuteText() bool {
+	return strings.TrimSpace(b.FullText) != "" && b.TextSource != "" && b.TextSource != TextSourceSummary
+}
+
+// TextFingerprint identifies the statute text a deliberation was based on, so
+// that newly published text invalidates the memo written against the old one.
+func (b Bill) TextFingerprint() string { return Fingerprint(b.FullText) }
+
+// Fingerprint is a short content hash used to tie cached model work to the
+// exact text it read.
+func Fingerprint(s string) string {
+	if strings.TrimSpace(s) == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(s))
+	return hex.EncodeToString(sum[:8])
+}
+
+// Vote is one model's verdict on one bill. Pros and Cons are copied from the
+// model's own deliberation memo when the record is served to the UI.
 type Vote struct {
 	BillID    string    `json:"billId"`
 	ModelKey  string    `json:"modelKey"`
@@ -92,8 +135,30 @@ type Vote struct {
 	Vote      string    `json:"vote"`
 	Reason    string    `json:"reason"`
 	Error     string    `json:"error,omitempty"`
+	Pros      []string  `json:"pros,omitempty"`
+	Cons      []string  `json:"cons,omitempty"`
 	CreatedAt time.Time `json:"createdAt"`
 }
+
+// Deliberation is the pros/cons memo one model wrote for one bill before
+// voting on it, plus the section notes it took if the statute text was too
+// large to read in one pass. Every field here is private to a single model:
+// notes written by one model are never shown to another.
+type Deliberation struct {
+	BillID    string    `json:"billId"`
+	ModelKey  string    `json:"modelKey"`
+	ModelName string    `json:"modelName"`
+	Pros      []string  `json:"pros"`
+	Cons      []string  `json:"cons"`
+	Digest    string    `json:"digest,omitempty"`
+	Sections  int       `json:"sections"`
+	Overflow  bool      `json:"overflow"`
+	TextHash  string    `json:"textHash,omitempty"`
+	CreatedAt time.Time `json:"createdAt"`
+}
+
+// Usable reports whether the memo carries enough for a vote to rest on.
+func (d Deliberation) Usable() bool { return len(d.Pros) > 0 || len(d.Cons) > 0 }
 
 // BillWithVotes bundles a bill with every model verdict recorded for it, in
 // catalog order, with placeholders for models that have not voted yet.

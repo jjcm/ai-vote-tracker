@@ -40,19 +40,30 @@ func run(logger *log.Logger) error {
 		return err
 	}
 
-	st, err := store.Open(cfg.DatabasePath)
+	st, discarded, err := store.OpenWithMigration(cfg.DatabasePath)
 	if err != nil {
 		return err
 	}
 	defer st.Close()
+	if discarded > 0 {
+		logger.Printf("schema migration dropped %d verdict(s) cast on bill summaries; the corpus will be re-read as statute text", discarded)
+	}
 
 	siteURL := cfg.SiteURL
 	if siteURL == "" {
 		siteURL = "http://" + cfg.Addr()
 	}
-	router := openrouter.New(cfg.OpenRouterURL, cfg.OpenRouterKey, siteURL, cfg.RequestTimeout)
-	cg := congress.New(cfg.CongressBaseURL, cfg.CongressAPIKey)
+	router := openrouter.New(cfg.OpenRouterURL, cfg.OpenRouterKey, siteURL, cfg.RequestTimeout).
+		WithLogger(logger).
+		WithContextBudget(cfg.ContextBudgetRatio, cfg.ContextTokens)
+	cg := congress.New(cfg.CongressBaseURL, cfg.CongressAPIKey).
+		WithLogger(logger).
+		WithUserAgent(cfg.CongressUserAgent)
 	svc := votes.New(st, router, cg, cfg.BootstrapBills, logger)
+
+	if cfg.ContextTokens > 0 {
+		logger.Printf("MODEL_CONTEXT_TOKENS=%d overrides every model's context window", cfg.ContextTokens)
+	}
 
 	if !cfg.HasOpenRouter() {
 		logger.Printf("warning: OPENROUTER_KEY is not set — the site will render but every verdict stays pending")
@@ -64,11 +75,11 @@ func run(logger *log.Logger) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	bootstrapCtx, cancel := context.WithTimeout(ctx, cfg.BootstrapTimeout+60*time.Second)
-	if err := svc.Bootstrap(bootstrapCtx, cfg.BootstrapTimeout); err != nil {
+	// Bootstrap loads the corpus and hands the verdicts to a background
+	// backfill, so startup waits on Congress.gov at most and never on a model.
+	if err := svc.Bootstrap(ctx); err != nil {
 		logger.Printf("bootstrap: %v", err)
 	}
-	cancel()
 
 	srv := &http.Server{
 		Addr:              cfg.Addr(),

@@ -15,7 +15,6 @@ import (
 
 	"github.com/pwnies/ai-vote-tracker/internal/alignment"
 	"github.com/pwnies/ai-vote-tracker/internal/models"
-	"github.com/pwnies/ai-vote-tracker/internal/openrouter"
 	"github.com/pwnies/ai-vote-tracker/internal/store"
 	"github.com/pwnies/ai-vote-tracker/internal/votes"
 )
@@ -166,7 +165,7 @@ func (s *Server) handleBills(w http.ResponseWriter, r *http.Request) {
 
 	statuses := statusOptions(all)
 	writeJSON(w, http.StatusOK, billsResponse{
-		Bills:      filtered[start:end],
+		Bills:      withoutMemos(filtered[start:end]),
 		Total:      len(filtered),
 		Page:       page,
 		PerPage:    perPage,
@@ -194,11 +193,18 @@ func (s *Server) handleBill(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	// Bill XML runs to megabytes, so the statute text is opt-in rather than the
+	// default payload for a page that only needs the verdicts.
+	textChars := len(decorated[0].FullText)
+	if r.URL.Query().Get("text") != "true" {
+		decorated[0].FullText = ""
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"bill":     decorated[0],
-		"voting":   s.votes.IsRunning(bill.ID),
-		"models":   models.Catalog,
-		"pipeline": s.votes.Status(),
+		"bill":      decorated[0],
+		"textChars": textChars,
+		"voting":    s.votes.IsRunning(bill.ID),
+		"models":    models.Catalog,
+		"pipeline":  s.votes.Status(),
 	})
 }
 
@@ -257,54 +263,50 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.votes.Status())
 }
 
+// handleVote queues a round rather than running one. A model reading a
+// megabyte of statute section by section can take the better part of an hour,
+// and no client is going to hold a connection open for that: the round happens
+// in the background, and the reply is whatever is cached right now.
 func (s *Server) handleVote(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
 	id := r.PathValue("id")
-	force := r.URL.Query().Get("force") == "true"
 
-	// The round outlives the request: the client polls the bill endpoint.
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 5*time.Minute)
-	done := make(chan error, 1)
-	go func() {
-		defer cancel()
-		done <- s.votes.VoteBill(ctx, id, force)
-	}()
-
-	select {
-	case err := <-done:
-		if errors.Is(err, openrouter.ErrNoKey) {
-			writeError(w, http.StatusServiceUnavailable, "OPENROUTER_KEY is not set, so no votes can be collected")
-			return
-		}
-		if errors.Is(err, store.ErrNotFound) {
-			writeError(w, http.StatusNotFound, "bill not found")
-			return
-		}
-		if err != nil {
-			writeError(w, http.StatusBadGateway, err.Error())
-			return
-		}
-		bill, err := s.store.Bill(r.Context(), id)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, err.Error())
-			return
-		}
-		decorated, err := s.store.WithVotes(r.Context(), []models.Bill{bill})
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, err.Error())
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"bill": decorated[0], "voting": false})
-	case <-time.After(25 * time.Second):
-		writeJSON(w, http.StatusAccepted, map[string]any{"voting": true, "billId": id})
+	bill, err := s.store.Bill(ctx, id)
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "bill not found")
+		return
 	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if !s.votes.Status().VotingEnabled {
+		writeError(w, http.StatusServiceUnavailable, "OPENROUTER_KEY is not set, so no votes can be collected")
+		return
+	}
+
+	queued := s.votes.StartRound(id, r.URL.Query().Get("force") == "true")
+	decorated, err := s.store.WithVotes(ctx, []models.Bill{bill})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]any{
+		"bill":   decorated[0],
+		"billId": id,
+		"voting": true,
+		// False when a round for this bill was already under way, in which case
+		// this request joined it rather than starting a second one.
+		"queued": queued,
+	})
 }
 
 func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
-	if err := s.votes.Refresh(context.WithoutCancel(r.Context())); err != nil {
-		writeError(w, http.StatusBadGateway, err.Error())
-		return
-	}
-	writeJSON(w, http.StatusAccepted, map[string]any{"refreshing": true})
+	started := s.votes.Refresh()
+	writeJSON(w, http.StatusAccepted, map[string]any{
+		"refreshing":     true,
+		"alreadyRunning": !started,
+	})
 }
 
 // loadAll returns every bill with its verdicts. The statutory text is dropped:
@@ -322,6 +324,23 @@ func (s *Server) loadAll(ctx context.Context) ([]models.BillWithVotes, error) {
 		decorated[i].FullText = ""
 	}
 	return decorated, nil
+}
+
+// withoutMemos drops the pros and cons from a listing payload. The browse table
+// only renders vote glyphs, and five memos per row for a hundred rows is a lot
+// of JSON nobody reads.
+func withoutMemos(bills []models.BillWithVotes) []models.BillWithVotes {
+	out := make([]models.BillWithVotes, len(bills))
+	for i, b := range bills {
+		votes := make([]models.Vote, len(b.Votes))
+		for j, v := range b.Votes {
+			v.Pros, v.Cons = nil, nil
+			votes[j] = v
+		}
+		b.Votes = votes
+		out[i] = b
+	}
+	return out
 }
 
 func matches(b models.BillWithVotes, q string) bool {
