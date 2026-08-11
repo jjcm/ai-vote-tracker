@@ -237,6 +237,59 @@ func TestVoteEndpointOnAMissingBill(t *testing.T) {
 	}
 }
 
+// Congress.gov's CRS summaries open by repeating the bill's short title, which
+// the cards already print above them. Rows stored by an earlier build still
+// carry that echo, so the API strips it on the way out.
+func TestSummariesDoNotEchoTheBillTitle(t *testing.T) {
+	h, st := newServer(t)
+	bill := seedBill(t, st)
+	bill.Summary = bill.Title + " This bill overhauls border security and rewrites the asylum process."
+	if _, err := st.UpsertBill(context.Background(), bill); err != nil {
+		t.Fatalf("UpsertBill: %v", err)
+	}
+
+	const want = "This bill overhauls border security and rewrites the asylum process."
+	for _, target := range []string{"/api/bills/" + bill.ID, "/api/featured", "/api/bills", "/api/alignment"} {
+		_, payload, _ := do(t, h, http.MethodGet, target)
+		for _, got := range summaries(t, payload, bill.ID) {
+			if got != want {
+				t.Errorf("GET %s served summary %q, want the echo stripped: %q", target, got, want)
+			}
+		}
+	}
+}
+
+// summaries pulls every copy of one bill's summary out of a response, whichever
+// key that response files bills under.
+func summaries(t *testing.T, payload map[string]any, billID string) []string {
+	t.Helper()
+	var out []string
+	collect := func(v any) {
+		bill, ok := v.(map[string]any)
+		if ok && bill["id"] == billID {
+			out = append(out, bill["summary"].(string))
+		}
+	}
+	for _, key := range []string{"bill", "featured"} {
+		if v, ok := payload[key]; ok {
+			collect(v)
+		}
+	}
+	for _, key := range []string{"bills", "latest", "recentBills"} {
+		list, ok := payload[key].([]any)
+		if !ok {
+			continue
+		}
+		for _, v := range list {
+			collect(v)
+		}
+	}
+	if len(out) == 0 {
+		t.Fatalf("no copy of %s found in the response", billID)
+	}
+	return out
+}
+
 // Clicking a row goes to /bills/{id}, which is one client-rendered document
 // served for every bill, whether or not that id exists.
 func TestBillDetailPageIsServedForAnyBillPath(t *testing.T) {

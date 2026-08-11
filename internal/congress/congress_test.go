@@ -55,8 +55,10 @@ func newStub(t *testing.T, textVersions string) (*Client, *stub) {
 		s.record(r)
 		switch {
 		case r.URL.Path == "/summaries":
+			// CRS summaries open with the bill's short title as a paragraph of
+			// its own, exactly as reproduced here.
 			fmt.Fprintf(w, `{"summaries":[{"actionDate":"2025-04-02","actionDesc":"Introduced in Senate",
-			  "text":"<p>%s</p>","updateDate":"2025-05-08T00:00:00Z",
+			  "text":"<p><b>Border Security and Asylum Reform Act of 2025</b></p><p>%s</p>","updateDate":"2025-05-08T00:00:00Z",
 			  "bill":{"congress":119,"number":"1264","originChamber":"Senate","type":"S",
 			  "title":"Border Security and Asylum Reform Act of 2025"}}]}`,
 				strings.Repeat("This bill strengthens border security measures. ", 5))
@@ -120,6 +122,11 @@ func TestRecentBillsPrefersTheLatestFormattedXML(t *testing.T) {
 	// models read.
 	if b.Summary == "" || strings.Contains(b.FullText, "This bill strengthens") {
 		t.Errorf("summary %q leaked into the statute text", b.Summary)
+	}
+	// The card prints the title directly above the summary, so the summary's
+	// own opening repeat of it is dropped rather than clipped into the card.
+	if !strings.HasPrefix(b.Summary, "This bill strengthens") {
+		t.Errorf("summary = %q, want it to open with the summary rather than the title", clip(b.Summary))
 	}
 	if b.PolicyArea != "Immigration" || b.Sponsor == "" || b.Status == "" {
 		t.Errorf("bill detail was not merged in: %+v", b)

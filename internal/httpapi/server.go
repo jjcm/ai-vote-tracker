@@ -199,6 +199,7 @@ func (s *Server) handleBill(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	decorated = presentable(decorated)
 	// Bill XML runs to megabytes, so the statute text is opt-in rather than the
 	// default payload for a page that only needs the verdicts.
 	textChars := len(decorated[0].FullText)
@@ -298,7 +299,7 @@ func (s *Server) handleVote(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusAccepted, map[string]any{
-		"bill":   decorated[0],
+		"bill":   presentable(decorated)[0],
 		"billId": id,
 		"voting": true,
 		// False when a round for this bill was already under way, in which case
@@ -329,7 +330,17 @@ func (s *Server) loadAll(ctx context.Context) ([]models.BillWithVotes, error) {
 	for i := range decorated {
 		decorated[i].FullText = ""
 	}
-	return decorated, nil
+	return presentable(decorated), nil
+}
+
+// presentable drops each summary's leading echo of its own bill title. Cleaning
+// happens at ingest too, but rows written by earlier builds still carry the
+// echo, so the last word on it belongs to the layer that serves them.
+func presentable(bills []models.BillWithVotes) []models.BillWithVotes {
+	for i := range bills {
+		bills[i].Summary = models.SummaryWithoutTitleEcho(bills[i].Title, bills[i].Summary)
+	}
+	return bills
 }
 
 // withoutMemos drops the pros and cons from a listing payload. The browse table
