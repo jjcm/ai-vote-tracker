@@ -650,16 +650,26 @@ FROM member_votes ORDER BY voted_at DESC, bill_id ASC`)
 	return out, rows.Err()
 }
 
-// DeleteMemberVotesForBills drops the stored positions for bills that are no
-// longer in the corpus, so a shrinking window does not leave orphans behind.
-func (s *Store) DeleteMemberVotesForBills(ctx context.Context) (int, error) {
+// PurgeOrphanFloorVotes drops the stored positions for bills that are no
+// longer in the corpus, so a moving window does not leave orphans behind. The
+// roll calls they came from are forgotten with them: a bill that comes back
+// into the window has to be read again, and would otherwise be skipped as
+// already seen while carrying no positions at all.
+func (s *Store) PurgeOrphanFloorVotes(ctx context.Context) (int, error) {
 	res, err := s.db.ExecContext(ctx,
 		`DELETE FROM member_votes WHERE bill_id NOT IN (SELECT id FROM bills)`)
 	if err != nil {
 		return 0, err
 	}
 	n, err := res.RowsAffected()
-	return int(n), err
+	if err != nil {
+		return 0, err
+	}
+	if _, err := s.db.ExecContext(ctx,
+		`DELETE FROM roll_calls WHERE bill_id NOT IN (SELECT id FROM bills)`); err != nil {
+		return 0, err
+	}
+	return int(n), nil
 }
 
 // RollCall is the record that one roll call's member positions have been read.

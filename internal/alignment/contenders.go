@@ -5,7 +5,6 @@ import (
 	"math"
 	"sort"
 	"strings"
-	"time"
 
 	"github.com/pwnies/ai-vote-tracker/internal/contenders"
 	"github.com/pwnies/ai-vote-tracker/internal/models"
@@ -105,11 +104,15 @@ func MatchContenders(bills []models.BillWithVotes, memberVotes []models.MemberVo
 		members[mv.Bioguide] = true
 	}
 
+	positionCount := 0
+	for _, byMember := range byBill {
+		positionCount += len(byMember)
+	}
 	result := ContenderResult{
 		Candidates:      contenders.Roster,
 		NotInCongress:   contenders.NotInCongress,
 		MinOverlap:      minOverlap,
-		MemberPositions: len(memberVotes),
+		MemberPositions: positionCount,
 	}
 
 	type tally struct {
@@ -275,14 +278,6 @@ func explain(mc ModelContenders, minOverlap int) string {
 		return line + fmt.Sprintf(" They split on %s and %s.", c.Divergences[0], c.Divergences[1])
 	}
 	return line + fmt.Sprintf(" They split on %s and %d others.", c.Divergences[0], len(c.Divergences)-1)
-}
-
-// FormatSince renders the analysis window start for the methodology note.
-func FormatSince(t time.Time) string {
-	if t.IsZero() {
-		return ""
-	}
-	return t.UTC().Format("2006-01-02")
 }
 
 // tableVersion is part of the cache signature. Bump it whenever this file

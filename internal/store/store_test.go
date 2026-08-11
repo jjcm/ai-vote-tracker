@@ -371,9 +371,10 @@ func TestMemberVotesKeepTheLatestPosition(t *testing.T) {
 }
 
 // A window that moves on leaves positions behind for bills that are no longer
-// tracked; they are dropped rather than counted against a model that never
-// saw the bill.
-func TestMemberVotesForDroppedBillsArePurged(t *testing.T) {
+// tracked. They are dropped, and so is the record of having read the roll call
+// they came from — otherwise a bill that comes back into the window is skipped
+// as already seen while carrying no positions at all.
+func TestFloorVotesForDroppedBillsArePurged(t *testing.T) {
 	ctx := context.Background()
 	st := newStore(t)
 
@@ -388,10 +389,18 @@ func TestMemberVotesForDroppedBillsArePurged(t *testing.T) {
 			t.Fatalf("SaveMemberVote: %v", err)
 		}
 	}
+	for _, rc := range []RollCall{
+		{ID: "house-2026-283", BillID: "hr-8884-119"},
+		{ID: "house-2024-100", BillID: "hr-1-118"},
+	} {
+		if err := st.SaveRollCall(ctx, rc); err != nil {
+			t.Fatalf("SaveRollCall: %v", err)
+		}
+	}
 
-	dropped, err := st.DeleteMemberVotesForBills(ctx)
+	dropped, err := st.PurgeOrphanFloorVotes(ctx)
 	if err != nil {
-		t.Fatalf("DeleteMemberVotesForBills: %v", err)
+		t.Fatalf("PurgeOrphanFloorVotes: %v", err)
 	}
 	if dropped != 1 {
 		t.Errorf("dropped %d, want the one orphan", dropped)
@@ -399,6 +408,10 @@ func TestMemberVotesForDroppedBillsArePurged(t *testing.T) {
 	stored, err := st.MemberVotes(ctx)
 	if err != nil || len(stored) != 1 || stored[0].BillID != "hr-8884-119" {
 		t.Errorf("remaining = %+v (%v)", stored, err)
+	}
+	known, err := st.KnownRollCalls(ctx)
+	if err != nil || known["house-2024-100"] || !known["house-2026-283"] {
+		t.Errorf("known roll calls = %v (%v)", known, err)
 	}
 }
 

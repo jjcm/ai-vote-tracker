@@ -437,7 +437,7 @@ func (s *Service) ingestPositions(ctx context.Context, floor []rollcall.Vote) {
 		positions += matched
 	}
 
-	if orphans, err := s.store.DeleteMemberVotesForBills(ctx); err == nil && orphans > 0 {
+	if orphans, err := s.store.PurgeOrphanFloorVotes(ctx); err == nil && orphans > 0 {
 		s.logger.Printf("dropped %d floor vote(s) for bills no longer in the window", orphans)
 	}
 	if rolls > 0 {

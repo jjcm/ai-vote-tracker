@@ -3,6 +3,7 @@ package votes
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -16,6 +17,7 @@ import (
 	"github.com/pwnies/ai-vote-tracker/internal/congress"
 	"github.com/pwnies/ai-vote-tracker/internal/models"
 	"github.com/pwnies/ai-vote-tracker/internal/openrouter"
+	"github.com/pwnies/ai-vote-tracker/internal/rollcall"
 	"github.com/pwnies/ai-vote-tracker/internal/store"
 )
 
@@ -449,4 +451,135 @@ func waitUntil(t *testing.T, limit time.Duration, what string, done func() bool)
 		time.Sleep(20 * time.Millisecond)
 	}
 	t.Fatalf("timed out after %s waiting for %s", limit, what)
+}
+
+// floorStub serves the House Clerk documents the roll call reader walks: one
+// index page, the roll it names, and a 404 for everything past the end.
+func floorStub(t *testing.T) (*rollcall.Client, func(string) int) {
+	t.Helper()
+	var mu sync.Mutex
+	hits := map[string]int{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		hits[r.URL.Path]++
+		mu.Unlock()
+
+		switch r.URL.Path {
+		// The Clerk paginates a hundred roll calls to a page; only the third
+		// page of 2026 has anything this test cares about.
+		case "/house/2026/ROLL_000.asp", "/house/2026/ROLL_100.asp":
+			fmt.Fprint(w, `<HTML><BODY><TABLE><TR><TH>Roll</TH></TR></TABLE></BODY></HTML>`)
+		case "/house/2026/ROLL_200.asp":
+			fmt.Fprint(w, `<HTML><BODY><TABLE><TR><TH>Roll</TH><TH>Date</TH><TH>Issue</TH><TH>Question</TH><TH>Result</TH><TH>Title</TH></TR>
+<TR><TD><A HREF="x">283</A></TD><TD>23-Jul</TD><TD>H R 8884</TD><TD>On Passage</TD><TD>P</TD><TD>In the corpus</TD></TR>
+<TR><TD><A HREF="x">282</A></TD><TD>22-Jul</TD><TD>H R 9999</TD><TD>On Passage</TD><TD>P</TD><TD>Not in the corpus</TD></TR>
+</TABLE></BODY></HTML>`)
+		case "/house/2026/roll283.xml":
+			fmt.Fprint(w, `<rollcall-vote><vote-metadata><vote-type>YEA-AND-NAY</vote-type></vote-metadata><vote-data>
+<recorded-vote><legislator name-id="O000172" sort-field="Ocasio-Cortez" party="D" state="NY">Ocasio-Cortez</legislator><vote>Yea</vote></recorded-vote>
+<recorded-vote><legislator name-id="M001184" sort-field="Massie" party="R" state="KY">Massie</legislator><vote>Nay</vote></recorded-vote>
+<recorded-vote><legislator name-id="A000370" sort-field="Adams" party="D" state="NC">Adams</legislator><vote>Yea</vote></recorded-vote>
+</vote-data></rollcall-vote>`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	c := rollcall.New().
+		WithBaseURLs(srv.URL+"/house", srv.URL+"/senate").
+		WithClock(func() time.Time { return time.Date(2026, 8, 11, 0, 0, 0, 0, time.UTC) })
+	return c, func(path string) int {
+		mu.Lock()
+		defer mu.Unlock()
+		return hits[path]
+	}
+}
+
+// The floor votes of the 2028 watch list are read for the bills in the corpus,
+// and only for them: a member who is not a potential candidate, and a bill
+// nobody is tracking, are both passed over.
+func TestSyncFloorVotesStoresTheWatchListOnly(t *testing.T) {
+	ctx := context.Background()
+	svc, st, _ := newService(t)
+	client, hits := floorStub(t)
+	svc.WithRollCall(client)
+	svc.since = time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+
+	bill := testBill()
+	bill.ID, bill.Number = "hr-8884-119", "H.R. 8884"
+	if _, err := st.UpsertBill(ctx, bill); err != nil {
+		t.Fatalf("UpsertBill: %v", err)
+	}
+
+	svc.SyncFloorVotes(ctx)
+
+	stored, err := st.MemberVotes(ctx)
+	if err != nil {
+		t.Fatalf("MemberVotes: %v", err)
+	}
+	if len(stored) != 2 {
+		t.Fatalf("stored %d position(s), want the two watch list members: %+v", len(stored), stored)
+	}
+	byMember := map[string]models.MemberVote{}
+	for _, v := range stored {
+		byMember[v.Bioguide] = v
+	}
+	if got := byMember["O000172"]; got.Position != models.PositionYea || got.BillID != "hr-8884-119" {
+		t.Errorf("Ocasio-Cortez = %+v", got)
+	}
+	if got := byMember["M001184"]; got.Position != models.PositionNay || got.RollCall != "house-2026-283" {
+		t.Errorf("Massie = %+v", got)
+	}
+	if _, ok := byMember["A000370"]; ok {
+		t.Error("a member who is not a 2028 potential should not be stored")
+	}
+	// H.R. 9999 passed the House too, but nothing tracks it, so its roll call
+	// is never downloaded.
+	if n := hits("/house/2026/roll282.xml"); n != 0 {
+		t.Errorf("the roll call for an untracked bill was fetched %d time(s)", n)
+	}
+}
+
+// A roll call is downloaded once. The index is cheap and gets re-read; the
+// member positions behind it do not.
+func TestSyncFloorVotesReadsEachRollCallOnce(t *testing.T) {
+	ctx := context.Background()
+	svc, st, _ := newService(t)
+	client, hits := floorStub(t)
+	svc.WithRollCall(client)
+	svc.since = time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+
+	bill := testBill()
+	bill.ID, bill.Number = "hr-8884-119", "H.R. 8884"
+	if _, err := st.UpsertBill(ctx, bill); err != nil {
+		t.Fatalf("UpsertBill: %v", err)
+	}
+
+	svc.SyncFloorVotes(ctx)
+	svc.SyncFloorVotes(ctx)
+
+	if n := hits("/house/2026/roll283.xml"); n != 1 {
+		t.Errorf("the roll call was fetched %d time(s), want once", n)
+	}
+	if n := hits("/house/2026/ROLL_200.asp"); n != 2 {
+		t.Errorf("the index was read %d time(s), want once per sync", n)
+	}
+}
+
+// Without an analysis window there is nothing to read, and no request should
+// leave the process looking for one.
+func TestSyncFloorVotesDoesNothingWithoutAWindow(t *testing.T) {
+	svc, st, _ := newService(t)
+	client, hits := floorStub(t)
+	svc.WithRollCall(client)
+
+	svc.SyncFloorVotes(context.Background())
+
+	if n := hits("/house/2026/ROLL_000.asp"); n != 0 {
+		t.Errorf("the index was read %d time(s) with no window set", n)
+	}
+	if stored, err := st.MemberVotes(context.Background()); err != nil || len(stored) != 0 {
+		t.Errorf("stored = %+v (%v)", stored, err)
+	}
 }
