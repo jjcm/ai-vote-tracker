@@ -42,9 +42,11 @@ Read from `.env` (gitignored) or the process environment.
 | `CONGRESS_API_KEY` | *(optional)* | [Congress.gov API](https://api.congress.gov/sign-up/) key. Without it the built-in sample corpus is used. |
 | `OPENROUTER_BASE_URL` | `https://openrouter.ai/api/v1` | Override for local testing. |
 | `CONGRESS_BASE_URL` | `https://api.congress.gov/v3` | Override for local testing. |
-| `CONGRESS_USER_AGENT` | `AIVoteTracker/1.0 (…)` | What to call this client when talking to Congress.gov. Put contact details here if you like; leaving it blank keeps the built-in value rather than sending nothing. |
+| `CONGRESS_USER_AGENT` | `AIVoteTracker/1.0 (…)` | What to call this client when talking to Congress.gov, the House Clerk and the Senate. Put contact details here if you like; leaving it blank keeps the built-in value rather than sending nothing. |
 | `DATABASE_PATH` | `data/aivotes.db` | SQLite file. Delete it to re-seed and re-vote. |
-| `BOOTSTRAP_BILLS` | `12` | How many live bills to pull from Congress.gov. |
+| `BILLS_SINCE` | `2026-06-01` | Start of the analysis window. Bills, verdicts and congressional floor votes all cover legislation that has moved on or after this date. |
+| `BOOTSTRAP_BILLS` | `40` | How many live bills to pull from Congress.gov. |
+| `CONTENDER_MIN_OVERLAP` | `3` | How many bills a model and a member of Congress must both have taken a side on before the pair is ranked. |
 | `WEB_DIR` | *(unset)* | Serve `web/` from disk instead of the embedded copy, for frontend iteration. |
 | `MODEL_TIMEOUT_SECONDS` | `300` | Per-request timeout. Generous on purpose: a timeout here throws away a whole deliberation, and nothing is waiting on it. |
 | `CONTEXT_BUDGET_RATIO` | `0.75` | Share of a model's context window that statute text may fill before the bill is read section by section. |
@@ -126,7 +128,7 @@ so verdicts written by an older build are re-collected rather than left on the p
 | `/` | "How would AI vote?" — the featured bill with all five verdicts, each with the model's own pros and cons a click away, plus the latest bills table. |
 | `/bills` | Full listing with keyword search, chamber / model / status filters, and pagination. Clicking a row opens that bill. |
 | `/bills/{id}` | One bill, presented as the homepage card opened out: sponsor, policy area, stage, a link to Congress.gov, and the five verdicts with each model's pros and cons. |
-| `/alignment` | Each model's position on a −1.0 to +1.0 spectrum, model snapshots, methodology, and a recent-bill agreement grid. |
+| `/alignment` | Each model's position on a −1.0 to +1.0 spectrum, model snapshots, the sitting members of Congress floated for 2028 that each model votes with most often, methodology, and a recent-bill agreement grid. |
 | `/about` | Colophon. |
 
 ## API
@@ -137,7 +139,7 @@ so verdicts written by an older build are re-collected rather than left on the p
 | `GET /api/bills` | Filtered, paginated list. Query: `q`, `chamber`, `status`, `model`, `vote`, `page`, `perPage`. |
 | `GET /api/bills/{id}` | One bill with its verdicts, each carrying the `pros` and `cons` that model wrote, and the size of the statute text. Add `?text=true` for the text itself, which for a live bill is megabytes of XML. |
 | `POST /api/bills/{id}/vote` | Queue a round for a bill and return `202` with whatever is cached now; the round runs in the background. Add `?force=true` to start every model over from a blank page — fresh notes, fresh memo, fresh vote — instead of collecting only the missing verdicts. `queued` is false when a round was already under way. |
-| `GET /api/alignment` | Computed alignment, score bands, and recent bills. |
+| `GET /api/alignment` | Computed alignment, score bands, recent bills, and `contenderMatches`: each model's closest members of Congress, the watch list itself, and the frequently named potentials who hold no seat. |
 | `GET /api/models` | The model catalog. |
 | `GET /api/status` | Data source, whether voting is enabled, rounds in flight, whether a backfill is running. |
 | `POST /api/refresh` | Re-read the upstream bill list and vote anything new, in the background. Returns `202` at once; `alreadyRunning` is true when a refresh was already going. |
@@ -151,10 +153,72 @@ average of its votes — a Yes moves it toward the bill's score, a No moves it a
 so a model that consistently backs conservative bills lands near +1.0. Bills without
 a score contribute nothing.
 
+## The closest 2028 contenders
+
+The alignment page also asks a narrower question: of the people being floated
+for 2028 who can actually cast a vote, which one does each model vote like?
+
+**Who is on the list.** A curated set of sitting senators and representatives
+in `internal/contenders`. It is editorial and says so: there is no registry to
+read, because nobody has filed with the FEC, so the standard is *frequently
+mentioned as a 2028 presidential potential in national press as of 2026* — the
+recurring names in cycle handicapping and shortlist coverage. It lives in code
+so that adding or dropping a name is a diff somebody can argue with.
+
+Governors, the Vice President and cabinet officers come up as often as anyone
+on it and cast no floor votes, so there is nothing to compare a model against.
+They are named on the page under "named for 2028, but not in Congress" and
+carry no score. Nothing here is invented for them.
+
+**Where the votes come from.** The House Clerk (`clerk.house.gov/evs`) and the
+Senate (`senate.gov/legislative/LIS`), read directly as XML. Congress.gov,
+which the rest of this project uses, exposes House recorded votes through a
+beta `/v3/house-vote` endpoint and has no Senate equivalent at all, so a
+Congress.gov-only implementation could reach Ocasio-Cortez and Massie but not
+one senator — and the Senate is where almost every 2028 potential who can vote
+sits. Both chambers publish complete per-member roll calls with no key, the
+House stamping each legislator with a Bioguide ID and the Senate with an LIS
+member ID. Both sit behind the same CDN as Congress.gov, so every request is
+stamped with a user agent by its transport.
+
+Only votes on **final passage** count — `On Passage`, a suspension of the
+rules, concurring in the other chamber's amendment, overriding a veto. Cloture,
+motions to proceed, recommittals and amendments are votes about a bill's path
+rather than about enacting it, and a model that read the statute text and
+answered "would you pass this" has no opinion on them.
+
+**The arithmetic.** For each model and each member, over the bills where *both*
+took a binary side — the model returned Yes or No and the member is recorded
+Yea or Nay — the agreement rate is the share they landed on the same side of.
+Present, absent, and a verdict that never arrived leave the pair nothing to
+compare, so they come out of the denominator rather than counting as a
+disagreement. Below `CONTENDER_MIN_OVERLAP` shared votes a pair is reported but
+not ranked: one shared vote makes anybody a hundred per cent match.
+
+Ranking is not on the raw rate. The House takes dozens of final-passage votes
+in a session and the Senate takes a handful, so a senator is routinely three
+for three with a model while a representative is thirty of thirty-three, and
+ordering by rate alone hands every headline match to whoever has the least
+evidence behind it. The order is by the lower bound of the Wilson interval on
+the pair's agreement, which discounts a rate for how thin it is. The percentage
+the page prints is still the plain one.
+
+Member positions are cached in SQLite, keyed by bill and member so a bill voted
+on twice keeps the later position, and a roll call already read is never
+downloaded again. The agreement table is cached too, against a signature of the
+verdicts and floor votes it was computed from plus a version for the code that
+computed it, so a page load is a lookup until one of them moves. All of it runs
+in the background on startup, and none of it needs an API key.
+
 ## Bill sources
 
+The corpus covers the analysis window that starts at `BILLS_SINCE`, and within
+it the bills that reached a recorded vote on final passage come first: those
+are the ones where a model's verdict can be set against a member of Congress's.
+The `/summaries` feed then tops the list up to `BOOTSTRAP_BILLS`.
+
 With `CONGRESS_API_KEY` set, the Congress.gov `/summaries` feed names the bills that
-have moved recently (newest first, House and Senate bills only, ceremonial
+have moved in the window (newest first, House and Senate bills only, ceremonial
 resolutions skipped). For each one the server then reads
 `/bill/{congress}/{type}/{number}/text` and downloads the **Formatted XML** of the
 newest text version available, falling back to the **Formatted Text** print — and
@@ -194,9 +258,11 @@ internal/store    SQLite persistence
 internal/seed     offline bill corpus, written as bill XML
 internal/billtext token estimation and structural splitting of statute text
 internal/congress Congress.gov client, including bill text downloads
+internal/rollcall House Clerk and Senate roll calls, read as XML
+internal/contenders  the curated 2028 watch list, and who is on it but not in Congress
 internal/openrouter  chat completions client, the deliberation pipeline, response parsing
 internal/votes    bootstrap, parallel deliberation and voting rounds, refresh
-internal/alignment   spectrum computation
+internal/alignment   spectrum computation and model-to-member agreement
 web/              static site: HTML, CSS tokens, and native Web Components
 assets/design/    the reference renders this UI was built against
 ```

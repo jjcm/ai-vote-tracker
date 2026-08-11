@@ -246,14 +246,12 @@ func (s *Service) loadBills(ctx context.Context) error {
 	bills := seed.Bills()
 	source := models.SourceSeed
 
-	// The floor votes are read first because they decide which bills are worth
-	// having: a bill the House or Senate actually passed is one a model verdict
-	// can be compared against a member's, and one that never left committee is
-	// not.
-	floor := s.floorVotes(ctx)
-
 	if s.congress.Enabled() {
-		live, err := s.liveBills(ctx, floor)
+		// The floor votes are indexed first because they decide which bills
+		// are worth having: a bill the House or Senate actually passed is one
+		// a model verdict can be compared against a member's, and one that
+		// never left committee is not.
+		live, err := s.liveBills(ctx, s.floorVotes(ctx))
 		if err != nil {
 			s.logger.Printf("congress.gov fetch failed, falling back to the seed corpus: %v", err)
 		} else {
