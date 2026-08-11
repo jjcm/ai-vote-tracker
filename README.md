@@ -124,7 +124,8 @@ so verdicts written by an older build are re-collected rather than left on the p
 | Route | Contents |
 | --- | --- |
 | `/` | "How would AI vote?" — the featured bill with all five verdicts, each with the model's own pros and cons a click away, plus the latest bills table. |
-| `/bills` | Full listing with keyword search, chamber / model / status filters, and pagination. |
+| `/bills` | Full listing with keyword search, chamber / model / status filters, and pagination. Clicking a row opens that bill. |
+| `/bills/{id}` | One bill, presented as the homepage card opened out: sponsor, policy area, stage, a link to Congress.gov, and the five verdicts with each model's pros and cons. |
 | `/alignment` | Each model's position on a −1.0 to +1.0 spectrum, model snapshots, methodology, and a recent-bill agreement grid. |
 | `/about` | Colophon. |
 
