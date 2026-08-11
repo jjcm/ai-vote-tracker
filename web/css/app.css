@@ -624,9 +624,10 @@ bill-detail {
 }
 
 .bill-facts__list {
+  flex: 1 1 30rem;
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(11rem, auto));
-  gap: 0.9rem 2.2rem;
+  grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr));
+  gap: 1rem 2rem;
   margin: 0;
 }
 
