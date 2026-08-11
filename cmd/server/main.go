@@ -56,7 +56,9 @@ func run(logger *log.Logger) error {
 	router := openrouter.New(cfg.OpenRouterURL, cfg.OpenRouterKey, siteURL, cfg.RequestTimeout).
 		WithLogger(logger).
 		WithContextBudget(cfg.ContextBudgetRatio, cfg.ContextTokens)
-	cg := congress.New(cfg.CongressBaseURL, cfg.CongressAPIKey).WithLogger(logger)
+	cg := congress.New(cfg.CongressBaseURL, cfg.CongressAPIKey).
+		WithLogger(logger).
+		WithUserAgent(cfg.CongressUserAgent)
 	svc := votes.New(st, router, cg, cfg.BootstrapBills, logger)
 
 	if cfg.ContextTokens > 0 {

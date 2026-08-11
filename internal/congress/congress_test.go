@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/pwnies/ai-vote-tracker/internal/models"
@@ -23,14 +24,35 @@ var statute = `<?xml version="1.0"?><bill><legis-body><section id="H1"><enum>1.<
 // file downloads the last of those points at.
 type stub struct {
 	textVersions string // JSON body for /text
-	hits         map[string]int
+
+	mu     sync.Mutex
+	hits   map[string]int
+	agents map[string]string // path -> the User-Agent it arrived with
+}
+
+func (s *stub) record(r *http.Request) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.hits[r.URL.Path]++
+	s.agents[r.URL.Path] = r.Header.Get("User-Agent")
+}
+
+// seenAgents returns the user agent every request arrived with, by path.
+func (s *stub) seenAgents() map[string]string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make(map[string]string, len(s.agents))
+	for path, agent := range s.agents {
+		out[path] = agent
+	}
+	return out
 }
 
 func newStub(t *testing.T, textVersions string) (*Client, *stub) {
 	t.Helper()
-	s := &stub{textVersions: textVersions, hits: map[string]int{}}
+	s := &stub{textVersions: textVersions, hits: map[string]int{}, agents: map[string]string{}}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		s.hits[r.URL.Path]++
+		s.record(r)
 		switch {
 		case r.URL.Path == "/summaries":
 			fmt.Fprintf(w, `{"summaries":[{"actionDate":"2025-04-02","actionDesc":"Introduced in Senate",
@@ -180,4 +202,74 @@ func clip(s string) string {
 		return s[:120] + "…"
 	}
 	return s
+}
+
+// Congress.gov is behind a CDN that answers an unidentified request with a
+// block page instead of a bill: 403 from www.congress.gov, and a Cloudflare
+// 1010 from api.congress.gov on some networks. Every request has to say who it
+// is — the JSON calls and the text downloads alike.
+func TestEveryRequestIdentifiesItself(t *testing.T) {
+	c, s := newStub(t, `{"textVersions":[{"type":"Introduced in Senate","date":"2025-04-02T04:00:00Z",
+	  "formats":[{"type":"Formatted XML","url":"{{base}}/119/bills/s1264/BILLS-119s1264is.xml"}]}]}`)
+
+	if _, err := c.RecentBills(context.Background(), 1); err != nil {
+		t.Fatalf("RecentBills: %v", err)
+	}
+
+	agents := s.seenAgents()
+	if len(agents) < 4 {
+		t.Fatalf("only %d path(s) were requested: %v", len(agents), agents)
+	}
+	for path, agent := range agents {
+		if agent == "" {
+			t.Errorf("%s went out with no user agent", path)
+		}
+		if strings.HasPrefix(agent, "Go-http-client") {
+			t.Errorf("%s went out with the default library user agent %q", path, agent)
+		}
+		if agent != DefaultUserAgent {
+			t.Errorf("%s user agent = %q, want %q", path, agent, DefaultUserAgent)
+		}
+	}
+	// Named explicitly so a refactor cannot quietly drop the download, which is
+	// the request that fails hardest without a user agent.
+	for _, want := range []string{"/summaries", "/119/bills/s1264/BILLS-119s1264is.xml"} {
+		if _, ok := agents[want]; !ok {
+			t.Errorf("%s was never requested: %v", want, agents)
+		}
+	}
+}
+
+// An operator adding contact details replaces the agent everywhere.
+func TestUserAgentOverrideAppliesToDownloadsToo(t *testing.T) {
+	const custom = "AIVoteTracker/1.0 (someone@example.com)"
+	c, s := newStub(t, `{"textVersions":[{"type":"Introduced in Senate","date":"2025-04-02T04:00:00Z",
+	  "formats":[{"type":"Formatted XML","url":"{{base}}/119/bills/s1264/BILLS-119s1264is.xml"}]}]}`)
+	c.WithUserAgent(custom)
+
+	if _, err := c.RecentBills(context.Background(), 1); err != nil {
+		t.Fatalf("RecentBills: %v", err)
+	}
+	for path, agent := range s.seenAgents() {
+		if agent != custom {
+			t.Errorf("%s user agent = %q, want %q", path, agent, custom)
+		}
+	}
+}
+
+// An unset CONGRESS_USER_AGENT must not become an empty header, which is the
+// one thing the CDN refuses outright.
+func TestBlankUserAgentKeepsTheDefault(t *testing.T) {
+	c, s := newStub(t, `{"textVersions":[{"type":"Introduced in Senate","date":"2025-04-02T04:00:00Z",
+	  "formats":[{"type":"Formatted XML","url":"{{base}}/119/bills/s1264/BILLS-119s1264is.xml"}]}]}`)
+	c.WithUserAgent("   ")
+
+	if _, err := c.RecentBills(context.Background(), 1); err != nil {
+		t.Fatalf("RecentBills: %v", err)
+	}
+	for path, agent := range s.seenAgents() {
+		if agent != DefaultUserAgent {
+			t.Errorf("%s user agent = %q, want the default to survive a blank override", path, agent)
+		}
+	}
 }

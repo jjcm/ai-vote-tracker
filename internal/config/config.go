@@ -14,18 +14,21 @@ import (
 
 // Config holds every runtime knob the server understands.
 type Config struct {
-	Host             string
-	Port             int
-	OpenRouterKey    string
-	OpenRouterURL    string
-	CongressAPIKey   string
-	CongressBaseURL  string
-	DatabasePath     string
-	WebDir           string
-	SiteURL          string
-	BootstrapBills   int
-	RequestTimeout   time.Duration
-	BootstrapTimeout time.Duration
+	Host            string
+	Port            int
+	OpenRouterKey   string
+	OpenRouterURL   string
+	CongressAPIKey  string
+	CongressBaseURL string
+	// CongressUserAgent identifies this client to Congress.gov, which blocks
+	// requests that do not identify themselves. Blank keeps the built-in one.
+	CongressUserAgent string
+	DatabasePath      string
+	WebDir            string
+	SiteURL           string
+	BootstrapBills    int
+	RequestTimeout    time.Duration
+	BootstrapTimeout  time.Duration
 	// ContextBudgetRatio is the share of a model's context window that statute
 	// text may fill before the bill is read section by section instead.
 	ContextBudgetRatio float64
@@ -40,17 +43,20 @@ func Load() (*Config, error) {
 	_ = godotenv.Load()
 
 	cfg := &Config{
-		Host:             envStr("HOST", "127.0.0.1"),
-		Port:             envInt("PORT", 8400),
-		OpenRouterKey:    strings.TrimSpace(os.Getenv("OPENROUTER_KEY")),
-		OpenRouterURL:    envStr("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"),
-		CongressAPIKey:   strings.TrimSpace(os.Getenv("CONGRESS_API_KEY")),
-		CongressBaseURL:  envStr("CONGRESS_BASE_URL", "https://api.congress.gov/v3"),
-		DatabasePath:     envStr("DATABASE_PATH", "data/aivotes.db"),
-		WebDir:           strings.TrimSpace(os.Getenv("WEB_DIR")),
-		SiteURL:          envStr("SITE_URL", ""),
-		BootstrapBills:   envInt("BOOTSTRAP_BILLS", 12),
-		RequestTimeout:   time.Duration(envInt("MODEL_TIMEOUT_SECONDS", 90)) * time.Second,
+		Host:            envStr("HOST", "127.0.0.1"),
+		Port:            envInt("PORT", 8400),
+		OpenRouterKey:   strings.TrimSpace(os.Getenv("OPENROUTER_KEY")),
+		OpenRouterURL:   envStr("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"),
+		CongressAPIKey:  strings.TrimSpace(os.Getenv("CONGRESS_API_KEY")),
+		CongressBaseURL: envStr("CONGRESS_BASE_URL", "https://api.congress.gov/v3"),
+
+		CongressUserAgent: strings.TrimSpace(os.Getenv("CONGRESS_USER_AGENT")),
+
+		DatabasePath:   envStr("DATABASE_PATH", "data/aivotes.db"),
+		WebDir:         strings.TrimSpace(os.Getenv("WEB_DIR")),
+		SiteURL:        envStr("SITE_URL", ""),
+		BootstrapBills: envInt("BOOTSTRAP_BILLS", 12),
+		RequestTimeout: time.Duration(envInt("MODEL_TIMEOUT_SECONDS", 90)) * time.Second,
 		// A round is now at least two calls per model, and more when a bill has
 		// to be digested section by section, so the featured bill needs longer
 		// than a single completion's worth of patience.

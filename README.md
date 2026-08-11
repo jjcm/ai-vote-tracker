@@ -37,6 +37,7 @@ Read from `.env` (gitignored) or the process environment.
 | `CONGRESS_API_KEY` | *(optional)* | [Congress.gov API](https://api.congress.gov/sign-up/) key. Without it the built-in sample corpus is used. |
 | `OPENROUTER_BASE_URL` | `https://openrouter.ai/api/v1` | Override for local testing. |
 | `CONGRESS_BASE_URL` | `https://api.congress.gov/v3` | Override for local testing. |
+| `CONGRESS_USER_AGENT` | `AIVoteTracker/1.0 (…)` | What to call this client when talking to Congress.gov. Put contact details here if you like; leaving it blank keeps the built-in value rather than sending nothing. |
 | `DATABASE_PATH` | `data/aivotes.db` | SQLite file. Delete it to re-seed and re-vote. |
 | `BOOTSTRAP_BILLS` | `12` | How many live bills to pull from Congress.gov. |
 | `WEB_DIR` | *(unset)* | Serve `web/` from disk instead of the embedded copy, for frontend iteration. |
@@ -139,6 +140,13 @@ back. If the whole fetch fails, the server falls back to the offline corpus.
 
 The CRS summary is still stored, because the bill cards read better with it. It is
 not shown to any model.
+
+Both hosts are behind a CDN that will not serve an anonymous client: a text
+download with no `User-Agent` gets a 403 from `www.congress.gov`, and a request
+with a default library agent can draw a Cloudflare 1010 from `api.congress.gov`
+depending on the network it comes from. Every request the client makes is
+therefore stamped with a descriptive agent by its transport, downloads included,
+so no call site can omit one. `CONGRESS_USER_AGENT` replaces it.
 
 Without a key the server uses a corpus of thirteen sample bills written as bill XML
 in the same shape Congress.gov publishes, including an appropriations act long

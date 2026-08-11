@@ -28,6 +28,13 @@ import (
 // megabytes of XML; anything past this is not a bill.
 const maxTextBytes = 24 << 20
 
+// DefaultUserAgent identifies this client to Congress.gov. It is not optional:
+// congress.gov sits behind a CDN that answers a request carrying no user agent
+// with a 403, and answers one carrying a default library user agent with a
+// Cloudflare 1010 block from some networks. Either way the reply is a block
+// page rather than a bill, so every request this package makes is stamped.
+const DefaultUserAgent = "AIVoteTracker/1.0 (+https://github.com/pwnies/ai-vote-tracker)"
+
 // Client is a read-only Congress.gov API client.
 type Client struct {
 	baseURL string
@@ -41,9 +48,43 @@ func New(baseURL, apiKey string) *Client {
 	return &Client{
 		baseURL: strings.TrimRight(baseURL, "/"),
 		apiKey:  apiKey,
-		// Bill XML downloads are slower than the JSON calls around them.
-		http: &http.Client{Timeout: 90 * time.Second},
+		http: &http.Client{
+			// Bill XML downloads are slower than the JSON calls around them.
+			Timeout:   90 * time.Second,
+			Transport: identify(DefaultUserAgent, nil),
+		},
 	}
+}
+
+// WithUserAgent replaces the user agent sent with every request, which is where
+// an operator puts contact details. A blank agent is ignored rather than sent:
+// an unset environment variable must not turn into a request the CDN blocks.
+func (c *Client) WithUserAgent(agent string) *Client {
+	if agent = strings.TrimSpace(agent); agent != "" {
+		c.http.Transport = identify(agent, nil)
+	}
+	return c
+}
+
+// identifier stamps the user agent on every request that leaves the client, so
+// that no call site can forget one.
+type identifier struct {
+	agent string
+	base  http.RoundTripper
+}
+
+func identify(agent string, base http.RoundTripper) http.RoundTripper {
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	return identifier{agent: agent, base: base}
+}
+
+func (t identifier) RoundTrip(req *http.Request) (*http.Response, error) {
+	// A RoundTripper may not modify the request it is handed.
+	clone := req.Clone(req.Context())
+	clone.Header.Set("User-Agent", t.agent)
+	return t.base.RoundTrip(clone)
 }
 
 // WithLogger records which text version each bill was read from, and which
