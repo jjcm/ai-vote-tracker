@@ -85,6 +85,12 @@ func (s *Service) Bootstrap(ctx context.Context, syncTimeout time.Duration) erro
 		s.setSourceFromStore(ctx)
 	}
 
+	if purged, err := s.store.PurgeMalformedVotes(ctx); err != nil {
+		s.logger.Printf("purging malformed verdicts: %v", err)
+	} else if purged > 0 {
+		s.logger.Printf("dropped %d verdict(s) with a malformed rationale; they will be re-collected", purged)
+	}
+
 	if !s.router.Enabled() {
 		s.logger.Printf("OPENROUTER_KEY is not set: bills are loaded but no model votes will be collected")
 		return nil

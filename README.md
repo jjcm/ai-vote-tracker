@@ -56,9 +56,17 @@ Votes are collected from these five over OpenRouter, in parallel per bill:
 Each model is sent the bill number, title, chamber, latest action, summary, and an
 excerpt of the statutory text, and is asked for
 `{"vote": "Yes" | "No", "reason": "<one sentence>"}`. There is no abstain option.
-Replies that arrive fenced, prefixed, or in prose are salvaged where possible;
-anything that cannot be reduced to a binary verdict is recorded as an error and
-retried on the next round rather than shown as a vote.
+
+Replies rarely arrive that clean. The parser handles markdown fences, chatter on
+either side of the object, prose answers with no JSON at all, and objects that stop
+mid-string when a reasoning model spends its token budget on hidden thinking. A
+truncated reply is retried with double the budget before it is given up on, and a
+rationale that still carries the response envelope is discarded rather than printed.
+Anything that cannot be reduced to a binary verdict with a readable sentence is
+recorded as an error and retried on the next round rather than shown as a vote.
+
+On startup the server also drops any stored rationale that looks like leaked JSON,
+so verdicts written by an older build are re-collected rather than left on the page.
 
 ## Pages
 
