@@ -1,5 +1,5 @@
-import { api, escapeHTML, formatDateLong, cleanTitle } from '../api.js';
-import { capitol, info } from '../icons.js';
+import { api, escapeHTML } from '../api.js';
+import { billArticle, fillVerdicts, pipelineNotice } from './bill-card.js';
 
 /**
  * The homepage hero card: chamber kicker, bill title, status line, summary,
@@ -38,52 +38,9 @@ class FeaturedBill extends HTMLElement {
   }
 
   render(data) {
-    const bill = data.featured;
-    const chamberLabel = `${bill.chamber} Bill`;
-    const title = cleanTitle(bill.title, bill.number);
-    this.innerHTML = `
-      <article class="featured">
-        <div class="featured__body">
-          <span class="featured__spine" aria-hidden="true"></span>
-          <p class="featured__kicker">
-            <span class="featured__kicker-mark">${capitol(20)}</span>
-            ${escapeHTML(chamberLabel)}
-          </p>
-          <h2 class="featured__title">
-            ${escapeHTML(bill.number)} <span class="featured__dash">–</span> ${escapeHTML(title)}
-          </h2>
-          <div class="featured__meta">
-            <span class="chip">Status</span>
-            <span class="featured__status">${escapeHTML(bill.status || 'Introduced')}</span>
-            <time class="featured__date" datetime="${bill.updatedAt}">${formatDateLong(bill.updatedAt)}</time>
-          </div>
-          <div class="featured__summary">
-            <p>${escapeHTML(bill.summary)}</p>
-          </div>
-        </div>
-        <div class="verdicts">
-          <p class="verdicts__heading"><span>AI Vote Verdicts</span></p>
-          <div class="verdicts__grid" data-count="${bill.votes.length}"></div>
-        </div>
-      </article>
-      ${pipelineNotice(data.pipeline)}`;
-
-    const grid = this.querySelector('.verdicts__grid');
-    bill.votes.forEach((vote) => {
-      const card = document.createElement('model-vote-card');
-      card.vote = vote;
-      grid.appendChild(card);
-    });
+    this.innerHTML = `${billArticle(data.featured)}${pipelineNotice(data.pipeline)}`;
+    fillVerdicts(this, data.featured.votes);
   }
-}
-
-/** Explains an empty verdict panel rather than leaving five ellipses. */
-function pipelineNotice(pipeline) {
-  if (!pipeline || pipeline.votingEnabled) return '';
-  return `<p class="notice">
-      <span class="notice__icon" aria-hidden="true">${info(18)}</span>
-      <span>No verdicts yet: set <code>OPENROUTER_KEY</code> in <code>.env</code> and restart the server to collect votes.</span>
-    </p>`;
 }
 
 function skeleton() {

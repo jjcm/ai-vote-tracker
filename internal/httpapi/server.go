@@ -53,6 +53,12 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/status", s.handleStatus)
 	mux.HandleFunc("POST /api/refresh", s.handleRefresh)
 
+	// /bills/{id} is a client-rendered page: it fetches the bill it was asked
+	// for from the API, so every id serves the same document.
+	mux.HandleFunc("GET /bills/{id}", func(w http.ResponseWriter, r *http.Request) {
+		s.servePage(w, r, "bill.html")
+	})
+
 	static := http.FileServer(http.FS(s.web))
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if file, ok := pageRoutes[r.URL.Path]; ok {

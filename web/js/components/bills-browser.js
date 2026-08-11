@@ -1,5 +1,6 @@
 import { api, escapeHTML, formatDate, cleanTitle } from '../api.js';
-import { search as searchIcon, chevron, info } from '../icons.js';
+import { search as searchIcon, chevron, info, modelMark } from '../icons.js';
+import { billHref, wireRowLinks } from './row-link.js';
 
 const PER_PAGE = 8;
 
@@ -160,7 +161,14 @@ class BillsBrowser extends HTMLElement {
             <th scope="col" class="col-bill">Bill</th>
             <th scope="col" class="col-title">Title</th>
             <th scope="col" class="col-chamber">Chamber</th>
-            ${columns.map((m) => `<th scope="col" class="col-vote">${escapeHTML(m.name)}</th>`).join('')}
+            ${columns
+              .map(
+                (m) =>
+                  `<th scope="col" class="col-vote"><span class="col-vote__model">${modelMark(m.key, 18)}<span>${escapeHTML(
+                    m.name
+                  )}</span></span></th>`
+              )
+              .join('')}
             <th scope="col" class="col-updated">Updated</th>
             <th scope="col" class="col-go"><span class="visually-hidden">Open</span></th>
           </tr>
@@ -170,13 +178,7 @@ class BillsBrowser extends HTMLElement {
         </tbody>
       </table>`;
 
-    results.querySelectorAll('[data-bill]').forEach((rowEl) => {
-      rowEl.addEventListener('click', (e) => {
-        if (e.target.closest('a')) return;
-        rowEl.classList.toggle('is-open');
-      });
-    });
-
+    wireRowLinks(results);
     this.renderPagination(data);
   }
 
@@ -219,10 +221,10 @@ class BillsBrowser extends HTMLElement {
 
 function detailRow(bill, columns) {
   const byModel = new Map(bill.votes.map((v) => [v.modelKey, v]));
-  const href = bill.sourceUrl || '#';
+  const href = billHref(bill.id);
   return `
-    <tr data-bill="${escapeHTML(bill.id)}">
-      <td class="col-bill"><span class="bill-number">${escapeHTML(bill.number)}</span></td>
+    <tr class="row-link" data-href="${escapeHTML(href)}">
+      <td class="col-bill"><a class="bill-number" href="${escapeHTML(href)}">${escapeHTML(bill.number)}</a></td>
       <td class="col-title">
         <span class="ledger__title">${escapeHTML(cleanTitle(bill.title, bill.number))}</span>
         <span class="ledger__summary">${escapeHTML(bill.summary)}</span>
@@ -239,13 +241,9 @@ function detailRow(bill, columns) {
         })
         .join('')}
       <td class="col-updated">${formatDate(bill.updatedAt)}</td>
-      <td class="col-go">${
-        href === '#'
-          ? `<span class="row-go" aria-hidden="true">${chevron(15)}</span>`
-          : `<a class="row-go" href="${escapeHTML(href)}" rel="noopener" aria-label="Open ${escapeHTML(
-              bill.number
-            )} on congress.gov">${chevron(15)}</a>`
-      }</td>
+      <td class="col-go"><a class="row-go" href="${escapeHTML(href)}" aria-label="Open ${escapeHTML(
+        bill.number
+      )}">${chevron(15)}</a></td>
     </tr>`;
 }
 

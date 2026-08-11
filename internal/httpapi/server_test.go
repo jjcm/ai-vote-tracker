@@ -74,7 +74,12 @@ func newSlowServer(t *testing.T, delay time.Duration) (http.Handler, *store.Stor
 	svc := votes.New(st, client, congress.New("", ""), 4, logger)
 	t.Cleanup(func() { drain(t, svc) })
 
-	web := fstest.MapFS{"index.html": &fstest.MapFile{Data: []byte("<html></html>")}}
+	web := fstest.MapFS{
+		"index.html": &fstest.MapFile{Data: []byte("<html></html>")},
+		"bills.html": &fstest.MapFile{Data: []byte("<bills-browser></bills-browser>")},
+		"bill.html":  &fstest.MapFile{Data: []byte("<bill-detail></bill-detail>")},
+		"404.html":   &fstest.MapFile{Data: []byte("<html>not found</html>")},
+	}
 	return New(st, svc, web, logger).Handler(), st
 }
 
@@ -229,6 +234,31 @@ func TestVoteEndpointOnAMissingBill(t *testing.T) {
 	rec, _, _ := do(t, h, http.MethodPost, "/api/bills/nope/vote")
 	if rec.Code != http.StatusNotFound {
 		t.Errorf("status = %d, want 404", rec.Code)
+	}
+}
+
+// Clicking a row goes to /bills/{id}, which is one client-rendered document
+// served for every bill, whether or not that id exists.
+func TestBillDetailPageIsServedForAnyBillPath(t *testing.T) {
+	h, st := newServer(t)
+	bill := seedBill(t, st)
+
+	for _, target := range []string{"/bills/" + bill.ID, "/bills/does-not-exist"} {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, target, nil))
+		if rec.Code != http.StatusOK {
+			t.Errorf("GET %s returned %d, want 200", target, rec.Code)
+		}
+		if !strings.Contains(rec.Body.String(), "<bill-detail>") {
+			t.Errorf("GET %s served %q, want the bill detail page", target, rec.Body.String())
+		}
+	}
+
+	// The listing itself is untouched.
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/bills", nil))
+	if !strings.Contains(rec.Body.String(), "<bills-browser>") {
+		t.Errorf("GET /bills served %q, want the listing page", rec.Body.String())
 	}
 }
 

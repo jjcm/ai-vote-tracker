@@ -143,32 +143,30 @@ export function info(size = 18) {
 }
 
 /**
- * Model marks. Monoline geometry so the five sit together as a set, in the
- * same engraved register as the rest of the page.
+ * Model marks. The brand glyphs live as SVG files under /assets/models and are
+ * painted through a CSS mask, so each one picks up the surrounding ink colour
+ * and sits in the same engraved register as the rest of the page.
+ *
+ * Sources: Anthropic, OpenAI, DeepSeek and Google Gemini from Simple Icons
+ * (CC0); Grok from @lobehub/icons-static-svg (MIT). Trademarks belong to their
+ * respective owners.
  */
-const MODEL_MARKS = {
-  opus: `<circle cx="12" cy="12" r="8.4" fill="none" stroke="currentColor" stroke-width="1.4"/>
-         <circle cx="12" cy="12" r="4.4" fill="none" stroke="currentColor" stroke-width="1.4"/>
-         <path d="M12 1.6v2.6M12 19.8v2.6M1.6 12h2.6M19.8 12h2.6M4.7 4.7l1.9 1.9M17.4 17.4l1.9 1.9M19.3 4.7l-1.9 1.9M6.6 17.4l-1.9 1.9"
-               stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>`,
-  grok: `<path d="M4 20 20 4M9.5 4H20v10.5" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
-         <path d="M4 9.5 14.5 20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" opacity="0.55"/>`,
-  'gpt-sol': `<g fill="none" stroke="currentColor" stroke-width="1.35">
-         <ellipse cx="12" cy="12" rx="4" ry="9"/>
-         <ellipse cx="12" cy="12" rx="4" ry="9" transform="rotate(60 12 12)"/>
-         <ellipse cx="12" cy="12" rx="4" ry="9" transform="rotate(120 12 12)"/>
-       </g>
-       <circle cx="12" cy="12" r="1.7" fill="currentColor"/>`,
-  deepseek: `<path d="M3 15.5c3.4 0 3.4-3 6.8-3s3.4 3 6.8 3 3.4-3 4.4-3" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
-         <path d="M3 20c3.4 0 3.4-3 6.8-3s3.4 3 6.8 3 3.4-3 4.4-3" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" opacity="0.5"/>
-         <path d="M7.5 9.2 12 2.6l4.5 6.6" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>`,
-  gemini: `<path d="M12 2.5 15 9l6.5 3-6.5 3-3 6.5-3-6.5L2.5 12 9 9z" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/>
-         <path d="M12 7.5 13.4 10.6 16.5 12l-3.1 1.4L12 16.5l-1.4-3.1L7.5 12l3.1-1.4z" fill="currentColor" opacity="0.8"/>`,
+const MODEL_ICONS = {
+  opus: '/assets/models/opus.svg',
+  grok: '/assets/models/grok.svg',
+  'gpt-sol': '/assets/models/gpt-sol.svg',
+  deepseek: '/assets/models/deepseek.svg',
+  gemini: '/assets/models/gemini.svg',
 };
 
 export function modelMark(key, size = 20) {
-  const body = MODEL_MARKS[key] || MODEL_MARKS.opus;
-  return `<svg class="model-mark" viewBox="0 0 24 24" width="${size}" height="${size}" role="img" aria-hidden="true">${body}</svg>`;
+  const src = MODEL_ICONS[key];
+  if (!src) {
+    return `<svg class="model-mark" viewBox="0 0 24 24" width="${size}" height="${size}" role="img" aria-hidden="true">
+      <circle cx="12" cy="12" r="8.4" fill="none" stroke="currentColor" stroke-width="1.4"/>
+    </svg>`;
+  }
+  return `<span class="model-mark" style="--model-icon:url('${src}');--model-size:${size}px" aria-hidden="true"></span>`;
 }
 
 /** Horizontal rule with a centred star, used under page headlines. */
