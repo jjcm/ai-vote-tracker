@@ -59,9 +59,11 @@ function spectrumPanel(data) {
   const sorted = [...data.models].sort((a, b) => a.score - b.score);
   let lastPos = -Infinity;
   let level = 0;
+  let deepest = 0;
   const markers = sorted.map((m) => {
     const pos = positionFor(m.score);
     level = pos - lastPos < 9 ? level + 1 : 0;
+    deepest = Math.max(deepest, level);
     lastPos = pos;
     return `
       <div class="spectrum__marker spectrum__marker--${m.tone}" style="left:${pos.toFixed(2)}%;--level:${level}">
@@ -88,7 +90,7 @@ function spectrumPanel(data) {
             </div>`
           ).join('')}
         </div>
-        <div class="spectrum__axis">
+        <div class="spectrum__axis" style="--levels:${deepest}">
           <span class="spectrum__axis-line"></span>
           <span class="spectrum__center" aria-hidden="true"></span>
           ${TICKS.map((t) => `<span class="spectrum__notch" style="left:${positionFor(t.value)}%"></span>`).join('')}

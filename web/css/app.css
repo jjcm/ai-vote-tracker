@@ -44,6 +44,11 @@ img, svg {
   max-width: 100%;
 }
 
+/* Icons sit inside inline-flex wrappers; never let them be squeezed to zero. */
+svg {
+  flex: none;
+}
+
 button, input, select {
   font: inherit;
   color: inherit;
@@ -978,7 +983,8 @@ a:focus-visible {
 .spectrum__axis {
   position: relative;
   height: 2px;
-  margin-bottom: 4.6rem;
+  /* Overlapping markers stack downward; reserve room for the deepest one. */
+  margin-bottom: calc(3.4rem + var(--levels, 0) * 2.6rem);
 }
 
 .spectrum__axis-line {
@@ -1303,6 +1309,10 @@ a:focus-visible {
   align-items: center;
   gap: 0.35rem;
   color: var(--ink-soft);
+}
+
+.ledger--agreement .col-vote {
+  width: 7.5rem;
 }
 
 .ledger--agreement td {
