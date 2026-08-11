@@ -25,11 +25,26 @@ type Server struct {
 	votes  *votes.Service
 	web    fs.FS
 	logger *log.Logger
+	// minOverlap is how many shared floor votes a model and a member of
+	// Congress need before their agreement rate is ranked.
+	minOverlap int
 }
 
 // New builds the HTTP server. web is the filesystem holding the static site.
 func New(st *store.Store, svc *votes.Service, web fs.FS, logger *log.Logger) *Server {
-	return &Server{store: st, votes: svc, web: web, logger: logger}
+	return &Server{
+		store: st, votes: svc, web: web, logger: logger,
+		minOverlap: alignment.DefaultMinOverlap,
+	}
+}
+
+// WithContenderOverlap sets the minimum number of shared floor votes a
+// model-to-member comparison has to rest on.
+func (s *Server) WithContenderOverlap(n int) *Server {
+	if n > 0 {
+		s.minOverlap = n
+	}
+	return s
 }
 
 // pageRoutes maps clean URLs onto the static HTML files.
@@ -252,14 +267,54 @@ func (s *Server) handleAlignment(w http.ResponseWriter, r *http.Request) {
 		recent = len(all)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"models":      result.Models,
-		"bands":       result.Bands,
-		"recentBills": all[:recent],
-		"billsScored": result.BillsScored,
-		"billsTotal":  len(all),
-		"catalog":     models.Catalog,
-		"pipeline":    s.votes.Status(),
+		"models":           result.Models,
+		"bands":            result.Bands,
+		"recentBills":      all[:recent],
+		"billsScored":      result.BillsScored,
+		"billsTotal":       len(all),
+		"catalog":          models.Catalog,
+		"contenderMatches": s.contenderMatches(ctx, all),
+		"pipeline":         s.votes.Status(),
 	})
+}
+
+// contenderMatches returns each model's closest sitting members of Congress on
+// the 2028 watch list. The table is served from SQLite whenever the verdicts
+// and floor votes behind it are the ones it was computed from, so a page load
+// costs a lookup rather than a pass over the corpus.
+func (s *Server) contenderMatches(ctx context.Context, bills []models.BillWithVotes) alignment.ContenderResult {
+	inputs, err := s.store.ContenderInputs(ctx)
+	signature := ""
+	if err != nil {
+		s.logger.Printf("alignment: reading the contender cache inputs: %v", err)
+	} else {
+		signature = alignment.Signature(inputs.ModelVotes, inputs.ModelVotesAt,
+			inputs.MemberVotes, inputs.MemberVotesAt, s.minOverlap)
+		if payload, err := s.store.CachedContenders(ctx, signature); err == nil {
+			var cached alignment.ContenderResult
+			if json.Unmarshal(payload, &cached) == nil {
+				return cached
+			}
+		}
+	}
+
+	memberVotes, err := s.store.MemberVotes(ctx)
+	if err != nil {
+		s.logger.Printf("alignment: reading floor votes: %v", err)
+	}
+	result := alignment.MatchContenders(bills, memberVotes, s.minOverlap)
+	result.Since = s.votes.Status().BillsSince
+
+	if signature != "" {
+		payload, err := json.Marshal(result)
+		if err == nil {
+			err = s.store.SaveContenders(ctx, signature, payload)
+		}
+		if err != nil {
+			s.logger.Printf("alignment: caching the contender table: %v", err)
+		}
+	}
+	return result
 }
 
 func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
