@@ -5,6 +5,7 @@ package votes
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"sync"
 	"time"
@@ -148,12 +149,27 @@ func (s *Service) loadBills(ctx context.Context) error {
 		} else {
 			bills = live
 			source = models.SourceCongress
-			s.logger.Printf("loaded %d bills from congress.gov", len(bills))
+			s.logger.Printf("loaded %d bills with published statute text from congress.gov", len(bills))
 		}
 	}
 
 	for _, b := range bills {
-		if err := s.store.UpsertBill(ctx, b); err != nil {
+		if !b.HasStatuteText() {
+			s.logger.Printf("skipping %s: it carries no statute text for the models to read", b.ID)
+			continue
+		}
+		changed, err := s.store.UpsertBill(ctx, b)
+		if err != nil {
+			return err
+		}
+		if !changed {
+			continue
+		}
+		// The stored verdicts were cast on text this bill no longer has —
+		// either a superseded print, or the CRS summary an older build fed the
+		// models. Either way they are not verdicts on the law now in front of
+		// the models, so they are collected again.
+		if err := s.invalidate(ctx, b); err != nil {
 			return err
 		}
 	}
@@ -163,6 +179,19 @@ func (s *Service) loadBills(ctx context.Context) error {
 	if source == models.SourceSeed {
 		s.logger.Printf("loaded %d seed bills (set CONGRESS_API_KEY for live Congress.gov data)", len(bills))
 	}
+	return nil
+}
+
+// invalidate drops every model's reading of a bill whose statute text changed.
+func (s *Service) invalidate(ctx context.Context, bill models.Bill) error {
+	if err := s.store.DeleteDeliberations(ctx, bill.ID); err != nil {
+		return err
+	}
+	if err := s.store.DeleteVotes(ctx, bill.ID); err != nil {
+		return err
+	}
+	s.logger.Printf("statute text for %s changed (%s, %s): dropped the stored memos and verdicts so they are collected against the new text",
+		bill.ID, bill.TextVersion, bill.TextSource)
 	return nil
 }
 
@@ -212,6 +241,9 @@ func (s *Service) VoteBill(ctx context.Context, billID string, force bool) error
 	if err != nil {
 		return err
 	}
+	if !bill.HasStatuteText() {
+		return fmt.Errorf("%s has no statute text, so there is nothing for the models to read", bill.ID)
+	}
 
 	targets := models.Catalog
 	if !force {
@@ -225,21 +257,22 @@ func (s *Service) VoteBill(ctx context.Context, billID string, force bool) error
 		return nil
 	}
 
-	// One in-flight request per model: five concurrent calls is well within
-	// OpenRouter's limits and keeps a full round to roughly one model latency.
+	// One in-flight pipeline per model: five concurrent chains is well within
+	// OpenRouter's limits and keeps a full round to roughly one model's latency
+	// (plus its own section digests, when the bill needs them).
 	var writeMu sync.Mutex
 	g, gctx := errgroup.WithContext(ctx)
 	g.SetLimit(len(models.Catalog))
 	for _, m := range targets {
 		m := m
 		g.Go(func() error {
-			verdict, err := s.router.Vote(gctx, m, bill)
 			record := models.Vote{
 				BillID:    bill.ID,
 				ModelKey:  m.Key,
 				ModelName: m.Name,
 				CreatedAt: time.Now().UTC(),
 			}
+			verdict, err := s.decide(gctx, m, bill, &writeMu)
 			if err != nil {
 				s.logger.Printf("vote %s/%s failed: %v", bill.ID, m.Key, err)
 				record.Vote = models.VoteError
@@ -269,6 +302,56 @@ func (s *Service) VoteBill(ctx context.Context, billID string, force bool) error
 		}
 	}
 	return nil
+}
+
+// decide runs one model's full pipeline over a bill: its own pros and cons
+// memo — written from the statute text, or from its own section notes when the
+// text overruns its context window — and then its vote on that memo.
+//
+// The memo is cached against a fingerprint of the text it was written from, so
+// a re-vote reuses the model's own reasoning instead of improvising a new one.
+func (s *Service) decide(ctx context.Context, m models.Model, bill models.Bill, writeMu *sync.Mutex) (openrouter.Verdict, error) {
+	memo, err := s.memo(ctx, m, bill, writeMu)
+	if err != nil {
+		return openrouter.Verdict{}, err
+	}
+	verdict, err := s.router.Vote(ctx, m, bill, memo)
+	if errors.Is(err, openrouter.ErrStaleMemo) {
+		// The bill no longer fits this model's budget, and the cached memo has
+		// no section notes to vote from. Have the model read it again.
+		s.logger.Printf("memo for %s/%s predates the current context budget: re-reading the bill", bill.ID, m.Key)
+		if memo, err = s.freshMemo(ctx, m, bill, writeMu); err != nil {
+			return openrouter.Verdict{}, err
+		}
+		verdict, err = s.router.Vote(ctx, m, bill, memo)
+	}
+	return verdict, err
+}
+
+// memo returns the model's own pros and cons memo for a bill, reusing the
+// stored one when it was written against the same text.
+func (s *Service) memo(ctx context.Context, m models.Model, bill models.Bill, writeMu *sync.Mutex) (models.Deliberation, error) {
+	stored, err := s.store.Deliberation(ctx, bill.ID, m.Key)
+	switch {
+	case err == nil && stored.Usable() && stored.TextHash == bill.TextFingerprint():
+		return stored, nil
+	case err != nil && !errors.Is(err, store.ErrNotFound):
+		return models.Deliberation{}, err
+	}
+	return s.freshMemo(ctx, m, bill, writeMu)
+}
+
+func (s *Service) freshMemo(ctx context.Context, m models.Model, bill models.Bill, writeMu *sync.Mutex) (models.Deliberation, error) {
+	memo, err := s.router.Deliberate(ctx, m, bill)
+	if err != nil {
+		return models.Deliberation{}, err
+	}
+	writeMu.Lock()
+	defer writeMu.Unlock()
+	if err := s.store.SaveDeliberation(context.WithoutCancel(ctx), memo); err != nil {
+		return models.Deliberation{}, err
+	}
+	return memo, nil
 }
 
 func (s *Service) scoreIdeologies(ctx context.Context) error {
