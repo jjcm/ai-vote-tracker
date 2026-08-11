@@ -216,9 +216,15 @@ func (c *Client) download(ctx context.Context, rawURL string) (string, error) {
 	if resp.StatusCode >= 400 {
 		return "", fmt.Errorf("congress: download %s returned HTTP %d", rawURL, resp.StatusCode)
 	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxTextBytes))
+	// One byte past the ceiling distinguishes a bill that just fits from one
+	// that was cut off, which would otherwise be read as a shorter statute
+	// than Congress actually printed.
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxTextBytes+1))
 	if err != nil {
 		return "", fmt.Errorf("congress: read %s: %w", rawURL, err)
+	}
+	if len(body) > maxTextBytes {
+		return "", fmt.Errorf("congress: text at %s is larger than the %d byte ceiling", rawURL, maxTextBytes)
 	}
 	return string(body), nil
 }
