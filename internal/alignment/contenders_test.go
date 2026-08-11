@@ -1,6 +1,7 @@
 package alignment
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -159,6 +160,38 @@ func TestThinOverlapIsNotRanked(t *testing.T) {
 	}
 }
 
+// The House votes on final passage many times a session and the Senate only a
+// handful, so a perfect record over three votes must not outrank a strong one
+// over thirty. Three coin flips landing the same way is not evidence.
+func TestRankingDiscountsThinRecords(t *testing.T) {
+	var bills []models.BillWithVotes
+	var positions []models.MemberVote
+	for i := 1; i <= 33; i++ {
+		id := fmt.Sprintf("hr-%d-119", i)
+		bills = append(bills, votedBill(id, 1, map[string]string{"opus": models.VoteYes}))
+		// Massie is on the record for all thirty-three and splits on three of
+		// them; Booker's chamber only voted on the first three.
+		cast := models.PositionYea
+		if i%11 == 0 {
+			cast = models.PositionNay
+		}
+		positions = append(positions, floor(id, massie, cast, 1))
+		if i <= 3 {
+			positions = append(positions, floor(id, booker, models.PositionYea, 1))
+		}
+	}
+
+	opus := matchFor(t, MatchContenders(bills, positions, 3), "opus")
+	if opus.Closest.Bioguide != massie {
+		t.Errorf("closest = %s (%d of %d), want Massie: 30 of 33 is stronger evidence than 3 of 3",
+			opus.Closest.Name, opus.Closest.Agreed, opus.Closest.Overlap)
+	}
+	// The page still shows the plain rate; only the ordering is adjusted.
+	if opus.Top[1].Agreement != 1 || opus.Top[1].Confidence >= opus.Top[1].Agreement {
+		t.Errorf("Booker should read as 100%% agreement on a discounted score, got %+v", opus.Top[1])
+	}
+}
+
 // Ranking is by agreement, and a tie is broken by how much evidence the rate
 // rests on rather than by map order.
 func TestRankingPrefersAgreementThenEvidence(t *testing.T) {
@@ -273,5 +306,9 @@ func TestSignatureTracksItsInputs(t *testing.T) {
 	}
 	if Signature(10, 100, 20, 200, 3) != base {
 		t.Error("the same inputs must produce the same signature")
+	}
+	// A table written by an older build is stale however fresh its inputs are.
+	if !strings.HasPrefix(base, fmt.Sprint(tableVersion)+":") {
+		t.Errorf("signature %q should lead with the table version", base)
 	}
 }

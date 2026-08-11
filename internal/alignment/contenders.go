@@ -29,8 +29,11 @@ type ContenderMatch struct {
 	Note     string `json:"note,omitempty"`
 	// Agreement is the share of overlapping votes the two agreed on, 0 to 1.
 	Agreement float64 `json:"agreement"`
-	Agreed    int     `json:"agreed"`
-	Overlap   int     `json:"overlap"`
+	// Confidence is the agreement rate discounted for how little it rests on,
+	// and it is what the ranking is by. See rankingScore.
+	Confidence float64 `json:"confidence"`
+	Agreed     int     `json:"agreed"`
+	Overlap    int     `json:"overlap"`
 	// Divergences names the bills they split on, newest first, so the page can
 	// say where a close match came apart.
 	Divergences []string `json:"divergences,omitempty"`
@@ -176,6 +179,7 @@ func MatchContenders(bills []models.BillWithVotes, memberVotes []models.MemberVo
 				Chamber:     candidate.Chamber,
 				Note:        candidate.Note,
 				Agreement:   round3(float64(t.agreed) / float64(t.overlap)),
+				Confidence:  round3(rankingScore(t.agreed, t.overlap)),
 				Agreed:      t.agreed,
 				Overlap:     t.overlap,
 				Divergences: t.split,
@@ -210,13 +214,40 @@ func MatchContenders(bills []models.BillWithVotes, memberVotes []models.MemberVo
 	return result
 }
 
-// sortMatches orders by agreement, then by how much evidence the rate rests
-// on, then by name so the ordering never wobbles between requests.
+// rankingScore discounts an agreement rate by how little evidence it rests on:
+// the lower bound of the Wilson score interval on the agreed-of-overlap
+// proportion.
+//
+// Ranking on the raw rate would be close to useless here, because the two
+// chambers do not vote at the same rate. The House takes dozens of
+// final-passage votes in a session and the Senate takes a handful, so a
+// senator can easily be three for three with a model while a representative is
+// thirty of thirty-three — and three coin flips landing the same way is not
+// evidence of anything. Discounting for sample size puts the representative
+// first, which is the honest answer. The rate the page shows is still the
+// plain one; only the ordering uses this.
+func rankingScore(agreed, overlap int) float64 {
+	if overlap <= 0 {
+		return 0
+	}
+	// 1.96 standard deviations: the conventional 95% interval.
+	const z = 1.96
+	n := float64(overlap)
+	p := float64(agreed) / n
+	denominator := 1 + z*z/n
+	centre := p + z*z/(2*n)
+	spread := z * math.Sqrt(p*(1-p)/n+z*z/(4*n*n))
+	return math.Max(0, (centre-spread)/denominator)
+}
+
+// sortMatches orders by the sample-size-adjusted score, then by how much
+// evidence there is, then by name so the ordering never wobbles between
+// requests.
 func sortMatches(in []ContenderMatch) {
 	sort.SliceStable(in, func(i, j int) bool {
 		switch {
-		case in[i].Agreement != in[j].Agreement:
-			return in[i].Agreement > in[j].Agreement
+		case in[i].Confidence != in[j].Confidence:
+			return in[i].Confidence > in[j].Confidence
 		case in[i].Overlap != in[j].Overlap:
 			return in[i].Overlap > in[j].Overlap
 		}
@@ -254,10 +285,18 @@ func FormatSince(t time.Time) string {
 	return t.UTC().Format("2006-01-02")
 }
 
-// Signature identifies the inputs an agreement table was computed from, so a
-// cached table can be told apart from a stale one.
+// tableVersion is part of the cache signature. Bump it whenever this file
+// changes what a stored table would contain — a new field, a different
+// ranking, a reworded explanation — or a database written by the previous
+// build will keep serving the old answer to the new page.
+const tableVersion = 2
+
+// Signature identifies both the inputs an agreement table was computed from
+// and the code that computed it, so a cached table can be told apart from a
+// stale one.
 func Signature(modelVotes int, modelVotesAt int64, memberVotes int, memberVotesAt int64, minOverlap int) string {
 	return strings.Join([]string{
+		fmt.Sprint(tableVersion),
 		fmt.Sprint(modelVotes), fmt.Sprint(modelVotesAt),
 		fmt.Sprint(memberVotes), fmt.Sprint(memberVotesAt),
 		fmt.Sprint(minOverlap), fmt.Sprint(len(contenders.Roster)),
