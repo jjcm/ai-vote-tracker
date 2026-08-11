@@ -20,16 +20,39 @@ import (
 )
 
 // router counts the calls the service makes at each stage of the pipeline, so
-// the tests can tell a memo that was written from one that was reused.
+// the tests can tell a memo that was written from one that was reused. It can
+// also be made slow, or made to fail, to stand in for a real provider.
 type router struct {
-	mu     sync.Mutex
-	stages map[string]int
+	delay time.Duration // set before the service is used
+
+	mu        sync.Mutex
+	stages    map[string]int
+	failVotes int
 }
 
 func (r *router) count(stage string) int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.stages[stage]
+}
+
+// failVotesUntil makes the next n vote calls fail, the way a rate limit does.
+func (r *router) failVotesUntil(n int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.failVotes = n
+}
+
+// observe records a call and reports whether it should fail.
+func (r *router) observe(stage string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.stages[stage]++
+	if stage == "vote" && r.failVotes > 0 {
+		r.failVotes--
+		return true
+	}
+	return false
 }
 
 func newService(t *testing.T) (*Service, *store.Store, *router) {
@@ -62,9 +85,17 @@ func newService(t *testing.T) (*Service, *store.Store, *router) {
 		case strings.Contains(system, "ideological direction"):
 			stage, content = "ideology", `{"score": 0.3}`
 		}
-		r.mu.Lock()
-		r.stages[stage]++
-		r.mu.Unlock()
+
+		if r.delay > 0 {
+			time.Sleep(r.delay)
+		}
+		// A 400 is not retried inside the client, so an injected failure lands
+		// as a recorded Error and it is the backfill that has to come back for
+		// it.
+		if r.observe(stage) {
+			http.Error(w, `{"error":{"message":"the provider refused this request"}}`, http.StatusBadRequest)
+			return
+		}
 
 		json.NewEncoder(w).Encode(map[string]any{
 			"choices": []any{map[string]any{"message": map[string]string{"content": content}}},
@@ -80,6 +111,9 @@ func newService(t *testing.T) (*Service, *store.Store, *router) {
 
 	client := openrouter.New(srv.URL, "test-key", "", 5*time.Second)
 	svc := New(st, client, congress.New("", ""), 4, log.New(io.Discard, "", 0))
+	// Production waits minutes between backfill sweeps because nothing is
+	// waiting on the result. A test is.
+	svc.retryDelay = 10 * time.Millisecond
 	return svc, st, r
 }
 
@@ -139,9 +173,9 @@ func TestVoteBillRecordsAMemoAndAVoteForEveryModel(t *testing.T) {
 	}
 }
 
-// A re-vote reads the memo the model already wrote rather than improvising a
-// new one.
-func TestReVoteReusesTheStoredMemo(t *testing.T) {
+// Filling in a verdict that failed earlier reads the memo that model already
+// wrote for this text rather than improvising a new one.
+func TestFillingInAVerdictReusesTheStoredMemo(t *testing.T) {
 	ctx := context.Background()
 	svc, st, r := newService(t)
 	bill := testBill()
@@ -153,14 +187,45 @@ func TestReVoteReusesTheStoredMemo(t *testing.T) {
 	}
 	memoCalls := r.count("memo")
 
+	// One model's verdict goes missing, the way a rate limited call leaves it.
+	if err := st.SaveVote(ctx, models.Vote{
+		BillID: bill.ID, ModelKey: models.Catalog[1].Key, Vote: models.VoteError, Error: "rate limited",
+	}); err != nil {
+		t.Fatalf("SaveVote: %v", err)
+	}
+	if err := svc.VoteBill(ctx, bill.ID, false); err != nil {
+		t.Fatalf("VoteBill: %v", err)
+	}
+
+	if got := r.count("memo"); got != memoCalls {
+		t.Errorf("memo calls grew from %d to %d while filling in one verdict", memoCalls, got)
+	}
+	if got, want := r.count("vote"), len(models.Catalog)+1; got != want {
+		t.Errorf("%d vote call(s), want %d: only the missing verdict should be re-collected", got, want)
+	}
+}
+
+// Asking for a re-run means a re-run: the model reads the bill again and writes
+// a new memo rather than voting off the old one.
+func TestForcedRoundRewritesTheMemo(t *testing.T) {
+	ctx := context.Background()
+	svc, st, r := newService(t)
+	bill := testBill()
+	if _, err := st.UpsertBill(ctx, bill); err != nil {
+		t.Fatalf("UpsertBill: %v", err)
+	}
+	if err := svc.VoteBill(ctx, bill.ID, false); err != nil {
+		t.Fatalf("VoteBill: %v", err)
+	}
+
 	if err := svc.VoteBill(ctx, bill.ID, true); err != nil {
 		t.Fatalf("VoteBill(force): %v", err)
 	}
-	if got := r.count("memo"); got != memoCalls {
-		t.Errorf("memo calls grew from %d to %d on a re-vote", memoCalls, got)
+	if got, want := r.count("memo"), 2*len(models.Catalog); got != want {
+		t.Errorf("%d memo call(s) after a forced round, want %d", got, want)
 	}
 	if got, want := r.count("vote"), 2*len(models.Catalog); got != want {
-		t.Errorf("%d vote call(s) after a forced re-vote, want %d", got, want)
+		t.Errorf("%d vote call(s) after a forced round, want %d", got, want)
 	}
 }
 
@@ -221,17 +286,15 @@ func TestVoteBillRefusesABillWithoutStatuteText(t *testing.T) {
 	}
 }
 
-// Bootstrap on an empty database loads the offline corpus, which is statute
-// text, and votes it.
-func TestBootstrapVotesTheSeedCorpus(t *testing.T) {
+// Bootstrap loads the corpus and hands the verdicts to the background backfill,
+// which works through every bill and leaves a memo behind each verdict.
+func TestBootstrapLoadsTheCorpusAndVotesItInTheBackground(t *testing.T) {
 	ctx := context.Background()
 	svc, st, _ := newService(t)
 
-	if err := svc.Bootstrap(ctx, 30*time.Second); err != nil {
+	if err := svc.Bootstrap(ctx); err != nil {
 		t.Fatalf("Bootstrap: %v", err)
 	}
-	// The backfill runs in the background; the featured bill is voted before
-	// Bootstrap returns.
 	bills, err := st.Bills(ctx)
 	if err != nil {
 		t.Fatalf("Bills: %v", err)
@@ -244,14 +307,146 @@ func TestBootstrapVotesTheSeedCorpus(t *testing.T) {
 			t.Errorf("%s was loaded without statute text", b.ID)
 		}
 	}
-	missing, err := st.MissingVoteModels(ctx, bills[0].ID)
+	if svc.Status().Source != models.SourceSeed {
+		t.Errorf("source = %q, want the seed corpus", svc.Status().Source)
+	}
+
+	waitUntil(t, 60*time.Second, "every bill to have a full set of verdicts", func() bool {
+		pending, err := st.BillIDsMissingVotes(ctx)
+		return err == nil && len(pending) == 0
+	})
+	waitUntil(t, 30*time.Second, "the backfill to report itself finished", func() bool {
+		return !svc.Status().Backfilling
+	})
+
+	for _, b := range bills {
+		for _, m := range models.Catalog {
+			if _, err := st.Deliberation(ctx, b.ID, m.Key); err != nil {
+				t.Errorf("%s/%s has a verdict but no memo behind it: %v", b.ID, m.Key, err)
+			}
+		}
+	}
+}
+
+// Startup must not wait on a model. The site comes up, serves what is cached,
+// and shows the rest as pending while the backfill runs behind it.
+func TestBootstrapDoesNotWaitOnAModel(t *testing.T) {
+	ctx := context.Background()
+	svc, st, r := newService(t)
+	// A bill already in the database, so this measures the wait for verdicts
+	// rather than the wait for a corpus.
+	if _, err := st.UpsertBill(ctx, testBill()); err != nil {
+		t.Fatalf("UpsertBill: %v", err)
+	}
+	r.delay = 2 * time.Second
+
+	start := time.Now()
+	if err := svc.Bootstrap(ctx); err != nil {
+		t.Fatalf("Bootstrap: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > r.delay {
+		t.Errorf("Bootstrap blocked for %s on a provider answering in %s", elapsed, r.delay)
+	}
+	// Returning fast is only right if the work was handed off rather than
+	// dropped, so the round has to show up behind us.
+	waitUntil(t, 10*time.Second, "the backfill to pick the round up", func() bool {
+		return svc.Status().Backfilling || r.count("memo") > 0
+	})
+
+	waitUntil(t, 60*time.Second, "the backfill to finish", func() bool {
+		return !svc.Status().Backfilling
+	})
+	if missing, err := st.MissingVoteModels(ctx, testBill().ID); err != nil || len(missing) != 0 {
+		t.Errorf("%d verdict(s) missing after the backfill (err %v)", len(missing), err)
+	}
+}
+
+// A bill whose verdicts failed on the first sweep gets another one, rather than
+// showing an error until somebody notices.
+func TestBackfillSweepsAgainAfterAFailure(t *testing.T) {
+	ctx := context.Background()
+	svc, st, r := newService(t)
+	if _, err := st.UpsertBill(ctx, testBill()); err != nil {
+		t.Fatalf("UpsertBill: %v", err)
+	}
+
+	// The first vote call of the run fails outright; a second sweep gets a
+	// verdict for the model it cost.
+	r.failVotesUntil(1)
+	svc.backfill(ctx)
+
+	missing, err := st.MissingVoteModels(ctx, testBill().ID)
 	if err != nil {
 		t.Fatalf("MissingVoteModels: %v", err)
 	}
 	if len(missing) != 0 {
-		t.Errorf("the featured bill still needs %d verdict(s) after bootstrap", len(missing))
+		t.Errorf("%d verdict(s) still missing after the retry sweeps", len(missing))
 	}
-	if svc.Status().Source != models.SourceSeed {
-		t.Errorf("source = %q, want the seed corpus", svc.Status().Source)
+	if r.count("vote") <= len(models.Catalog) {
+		t.Errorf("%d vote call(s): the failed verdict was never retried", r.count("vote"))
 	}
+}
+
+// StartRound is what the HTTP layer calls, and it has to return at once.
+func TestStartRoundReturnsBeforeTheRoundDoes(t *testing.T) {
+	ctx := context.Background()
+	svc, st, r := newService(t)
+	r.delay = 300 * time.Millisecond
+	bill := testBill()
+	if _, err := st.UpsertBill(ctx, bill); err != nil {
+		t.Fatalf("UpsertBill: %v", err)
+	}
+
+	start := time.Now()
+	if !svc.StartRound(bill.ID, false) {
+		t.Fatal("StartRound did not start a round")
+	}
+	if elapsed := time.Since(start); elapsed > 100*time.Millisecond {
+		t.Errorf("StartRound blocked for %s", elapsed)
+	}
+
+	waitUntil(t, 30*time.Second, "the queued round to finish", func() bool {
+		pending, err := st.MissingVoteModels(ctx, bill.ID)
+		return err == nil && len(pending) == 0
+	})
+}
+
+// Refresh is called from a request handler, so it may not block either.
+func TestRefreshReturnsImmediately(t *testing.T) {
+	svc, st, r := newService(t)
+	r.delay = 200 * time.Millisecond
+
+	start := time.Now()
+	if !svc.Refresh() {
+		t.Fatal("Refresh did not start")
+	}
+	if elapsed := time.Since(start); elapsed > 100*time.Millisecond {
+		t.Errorf("Refresh blocked for %s", elapsed)
+	}
+	if svc.Refresh() {
+		t.Error("a second Refresh should have found the first one running")
+	}
+
+	waitUntil(t, 60*time.Second, "the refresh to load and vote the corpus", func() bool {
+		n, err := st.CountBills(context.Background())
+		if err != nil || n == 0 {
+			return false
+		}
+		pending, err := st.BillIDsMissingVotes(context.Background())
+		return err == nil && len(pending) == 0
+	})
+}
+
+// waitUntil polls a condition so a test can wait for background work without
+// leaving goroutines running into cleanup.
+func waitUntil(t *testing.T, limit time.Duration, what string, done func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(limit)
+	for time.Now().Before(deadline) {
+		if done() {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("timed out after %s waiting for %s", limit, what)
 }

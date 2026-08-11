@@ -75,11 +75,11 @@ func run(logger *log.Logger) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	bootstrapCtx, cancel := context.WithTimeout(ctx, cfg.BootstrapTimeout+60*time.Second)
-	if err := svc.Bootstrap(bootstrapCtx, cfg.BootstrapTimeout); err != nil {
+	// Bootstrap loads the corpus and hands the verdicts to a background
+	// backfill, so startup waits on Congress.gov at most and never on a model.
+	if err := svc.Bootstrap(ctx); err != nil {
 		logger.Printf("bootstrap: %v", err)
 	}
-	cancel()
 
 	srv := &http.Server{
 		Addr:              cfg.Addr(),

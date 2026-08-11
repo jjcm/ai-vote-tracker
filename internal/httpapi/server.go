@@ -15,7 +15,6 @@ import (
 
 	"github.com/pwnies/ai-vote-tracker/internal/alignment"
 	"github.com/pwnies/ai-vote-tracker/internal/models"
-	"github.com/pwnies/ai-vote-tracker/internal/openrouter"
 	"github.com/pwnies/ai-vote-tracker/internal/store"
 	"github.com/pwnies/ai-vote-tracker/internal/votes"
 )
@@ -264,54 +263,50 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.votes.Status())
 }
 
+// handleVote queues a round rather than running one. A model reading a
+// megabyte of statute section by section can take the better part of an hour,
+// and no client is going to hold a connection open for that: the round happens
+// in the background, and the reply is whatever is cached right now.
 func (s *Server) handleVote(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
 	id := r.PathValue("id")
-	force := r.URL.Query().Get("force") == "true"
 
-	// The round outlives the request: the client polls the bill endpoint.
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 5*time.Minute)
-	done := make(chan error, 1)
-	go func() {
-		defer cancel()
-		done <- s.votes.VoteBill(ctx, id, force)
-	}()
-
-	select {
-	case err := <-done:
-		if errors.Is(err, openrouter.ErrNoKey) {
-			writeError(w, http.StatusServiceUnavailable, "OPENROUTER_KEY is not set, so no votes can be collected")
-			return
-		}
-		if errors.Is(err, store.ErrNotFound) {
-			writeError(w, http.StatusNotFound, "bill not found")
-			return
-		}
-		if err != nil {
-			writeError(w, http.StatusBadGateway, err.Error())
-			return
-		}
-		bill, err := s.store.Bill(r.Context(), id)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, err.Error())
-			return
-		}
-		decorated, err := s.store.WithVotes(r.Context(), []models.Bill{bill})
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, err.Error())
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"bill": decorated[0], "voting": false})
-	case <-time.After(25 * time.Second):
-		writeJSON(w, http.StatusAccepted, map[string]any{"voting": true, "billId": id})
+	bill, err := s.store.Bill(ctx, id)
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "bill not found")
+		return
 	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if !s.votes.Status().VotingEnabled {
+		writeError(w, http.StatusServiceUnavailable, "OPENROUTER_KEY is not set, so no votes can be collected")
+		return
+	}
+
+	queued := s.votes.StartRound(id, r.URL.Query().Get("force") == "true")
+	decorated, err := s.store.WithVotes(ctx, []models.Bill{bill})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]any{
+		"bill":   decorated[0],
+		"billId": id,
+		"voting": true,
+		// False when a round for this bill was already under way, in which case
+		// this request joined it rather than starting a second one.
+		"queued": queued,
+	})
 }
 
 func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
-	if err := s.votes.Refresh(context.WithoutCancel(r.Context())); err != nil {
-		writeError(w, http.StatusBadGateway, err.Error())
-		return
-	}
-	writeJSON(w, http.StatusAccepted, map[string]any{"refreshing": true})
+	started := s.votes.Refresh()
+	writeJSON(w, http.StatusAccepted, map[string]any{
+		"refreshing":     true,
+		"alreadyRunning": !started,
+	})
 }
 
 // loadAll returns every bill with its verdicts. The statutory text is dropped:

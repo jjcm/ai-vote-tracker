@@ -20,10 +20,15 @@ go run ./cmd/server
 # open http://127.0.0.1:8400
 ```
 
-On first start the server loads a corpus of bills, votes the newest one
-synchronously so the homepage is never blank, and collects the remaining verdicts in
-the background. Everything is cached in SQLite, so OpenRouter is billed once per
-(bill, model) pair rather than once per page load.
+On first start the server loads a corpus of bills, starts serving immediately, and
+collects the verdicts in the background — newest bill first, so the homepage fills
+in from the top. Verdicts arrive as they are decided; until then the page shows them
+as pending and polls.
+
+Nobody ever waits on a model. Every verdict is collected once per (bill, model),
+cached in SQLite, and served from there, so the pipeline is free to be as slow as
+being thorough requires: no request blocks on it, no stage is skipped for speed, and
+a bill that takes an hour to work through takes an hour.
 
 ## Configuration
 
@@ -41,8 +46,7 @@ Read from `.env` (gitignored) or the process environment.
 | `DATABASE_PATH` | `data/aivotes.db` | SQLite file. Delete it to re-seed and re-vote. |
 | `BOOTSTRAP_BILLS` | `12` | How many live bills to pull from Congress.gov. |
 | `WEB_DIR` | *(unset)* | Serve `web/` from disk instead of the embedded copy, for frontend iteration. |
-| `MODEL_TIMEOUT_SECONDS` | `90` | Per-model request timeout. |
-| `BOOTSTRAP_TIMEOUT_SECONDS` | `240` | How long startup waits for the featured bill's verdicts. A round is at least two calls per model, and more when a bill has to be digested. |
+| `MODEL_TIMEOUT_SECONDS` | `300` | Per-request timeout. Generous on purpose: a timeout here throws away a whole deliberation, and nothing is waiting on it. |
 | `CONTEXT_BUDGET_RATIO` | `0.75` | Share of a model's context window that statute text may fill before the bill is read section by section. |
 | `MODEL_CONTEXT_TOKENS` | *(unset)* | Overrides every model's context window. For exercising the section-digest path without an omnibus-sized bill. |
 
@@ -80,8 +84,28 @@ Each model runs the same three stages, and runs all of them itself:
 
 Notes and memos are private to the model that wrote them: no model ever reads
 another's. Memos are cached against a fingerprint of the text they were written
-from, so a re-vote reuses a model's own reasoning, and newly published text
-discards it.
+from, so filling in a verdict that failed earlier reuses the model's own reasoning
+rather than improvising a new one, while newly published text discards it. Asking
+for a re-run with `?force=true` starts every model over from the text.
+
+## When the work happens
+
+None of this is on the request path:
+
+- **Startup** loads the corpus and hands the verdicts to a background backfill. The
+  server starts listening straight away, so a slow provider delays verdicts rather
+  than the site.
+- **The backfill** works through the bills that need verdicts one at a time, newest
+  first, then sweeps the corpus twice more with a pause between passes, so a model
+  that was rate limited or cut off gets another turn instead of leaving an error on
+  the page. Serial per bill keeps a long run readable in the log; within a bill the
+  five models run in parallel.
+- **`POST /api/bills/{id}/vote`** queues a round and answers `202` immediately with
+  the cached state. The page polls.
+- **`POST /api/refresh`** returns before it has even read the bill list.
+
+The read endpoints only ever touch SQLite, so they answer in microseconds whether or
+not a round is running.
 
 Replies rarely arrive clean. The parser handles markdown fences, chatter on either
 side of the object, prose answers with no JSON at all, memo arrays that stop after
@@ -111,11 +135,11 @@ so verdicts written by an older build are re-collected rather than left on the p
 | `GET /api/featured` | Featured bill plus the latest eight, with verdicts. |
 | `GET /api/bills` | Filtered, paginated list. Query: `q`, `chamber`, `status`, `model`, `vote`, `page`, `perPage`. |
 | `GET /api/bills/{id}` | One bill with its verdicts, each carrying the `pros` and `cons` that model wrote, and the size of the statute text. Add `?text=true` for the text itself, which for a live bill is megabytes of XML. |
-| `POST /api/bills/{id}/vote` | Re-run the models for a bill. Add `?force=true` to overwrite existing verdicts; otherwise only missing ones are collected. Returns `202` if the round outlives the request. |
+| `POST /api/bills/{id}/vote` | Queue a round for a bill and return `202` with whatever is cached now; the round runs in the background. Add `?force=true` to start every model over from a blank page — fresh notes, fresh memo, fresh vote — instead of collecting only the missing verdicts. `queued` is false when a round was already under way. |
 | `GET /api/alignment` | Computed alignment, score bands, and recent bills. |
 | `GET /api/models` | The model catalog. |
-| `GET /api/status` | Data source, whether voting is enabled, rounds in flight. |
-| `POST /api/refresh` | Re-read the upstream bill list and vote anything new. |
+| `GET /api/status` | Data source, whether voting is enabled, rounds in flight, whether a backfill is running. |
+| `POST /api/refresh` | Re-read the upstream bill list and vote anything new, in the background. Returns `202` at once; `alreadyRunning` is true when a refresh was already going. |
 
 ## How alignment is computed
 

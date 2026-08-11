@@ -22,7 +22,10 @@ import (
 var ErrNoKey = errors.New("openrouter: OPENROUTER_KEY is not set")
 
 const (
-	maxAttempts       = 3
+	// maxAttempts is deliberately patient. Nothing is waiting on a verdict, and
+	// giving up early on a rate limit or a reply cut off mid-rationale costs a
+	// whole deliberation, which is far more expensive than waiting.
+	maxAttempts       = 4
 	ideologyMaxTokens = 400
 	finishLength      = "length"
 )
@@ -232,7 +235,8 @@ func (c *Client) completeRaw(ctx context.Context, model, system, user string, ma
 				return "", false, err
 			}
 			if attempt < maxAttempts-1 {
-				delay := time.Duration(attempt*attempt) * 1500 * time.Millisecond
+				// 2s, 4s, 8s: long enough for a rate limit window to pass.
+				delay := time.Duration(int64(1)<<attempt) * 2 * time.Second
 				select {
 				case <-ctx.Done():
 					return "", false, ctx.Err()

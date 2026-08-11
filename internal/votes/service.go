@@ -19,6 +19,26 @@ import (
 	"github.com/pwnies/ai-vote-tracker/internal/store"
 )
 
+// Nobody waits on a model. A verdict is collected once per (bill, model) in the
+// background, cached in SQLite, and served from there, so the pipeline is free
+// to take as long as being thorough requires: every stage runs, retries are
+// patient, and a round that needs an hour gets one.
+const (
+	// roundTimeout bounds a single bill's round. A model reading a
+	// megabyte-scale bill section by section makes a dozen calls, so this is a
+	// backstop against a hung round rather than a latency target.
+	roundTimeout = 2 * time.Hour
+
+	// backfillPasses is how many times the backfill sweeps the corpus. A model
+	// that failed on the first pass — rate limited, or cut off mid-rationale —
+	// gets another turn rather than leaving an Error on the page until someone
+	// notices.
+	backfillPasses = 3
+	// backfillRetryDelay paces those extra sweeps, which is what makes a
+	// transient provider failure worth waiting out.
+	backfillRetryDelay = 2 * time.Minute
+)
+
 // Service runs voting rounds and keeps the bill corpus fresh.
 type Service struct {
 	store    *store.Store
@@ -28,9 +48,15 @@ type Service struct {
 
 	billLimit int
 
-	mu       sync.Mutex
-	inFlight map[string]bool
-	source   string
+	// retryDelay paces the backfill's extra sweeps. It is a field so tests do
+	// not have to wait out a production-sized pause.
+	retryDelay time.Duration
+
+	mu          sync.Mutex
+	inFlight    map[string]bool
+	source      string
+	backfilling bool
+	refreshing  bool
 }
 
 // New builds the service. congressClient may be disabled, in which case the
@@ -40,13 +66,14 @@ func New(st *store.Store, router *openrouter.Client, cg *congress.Client, billLi
 		billLimit = 12
 	}
 	return &Service{
-		store:     st,
-		router:    router,
-		congress:  cg,
-		logger:    logger,
-		billLimit: billLimit,
-		inFlight:  map[string]bool{},
-		source:    models.SourceSeed,
+		store:      st,
+		router:     router,
+		congress:   cg,
+		logger:     logger,
+		billLimit:  billLimit,
+		retryDelay: backfillRetryDelay,
+		inFlight:   map[string]bool{},
+		source:     models.SourceSeed,
 	}
 }
 
@@ -56,6 +83,7 @@ type Status struct {
 	VotingEnabled   bool   `json:"votingEnabled"`
 	CongressEnabled bool   `json:"congressEnabled"`
 	BillsInFlight   int    `json:"billsInFlight"`
+	Backfilling     bool   `json:"backfilling"`
 }
 
 // Status returns the current pipeline state.
@@ -67,13 +95,15 @@ func (s *Service) Status() Status {
 		VotingEnabled:   s.router.Enabled(),
 		CongressEnabled: s.congress.Enabled(),
 		BillsInFlight:   len(s.inFlight),
+		Backfilling:     s.backfilling || s.refreshing,
 	}
 }
 
-// Bootstrap loads bills if the database is empty, then votes the newest bill
-// synchronously (so the homepage is never blank) and the rest in the
-// background.
-func (s *Service) Bootstrap(ctx context.Context, syncTimeout time.Duration) error {
+// Bootstrap loads bills if the database is empty and hands the collecting of
+// verdicts to a background backfill. It does not wait for a model: the site
+// comes up immediately, serves whatever is already cached, and shows the rest
+// as pending while the backfill fills it in.
+func (s *Service) Bootstrap(ctx context.Context) error {
 	count, err := s.store.CountBills(ctx)
 	if err != nil {
 		return err
@@ -97,45 +127,84 @@ func (s *Service) Bootstrap(ctx context.Context, syncTimeout time.Duration) erro
 		return nil
 	}
 
-	pending, err := s.store.BillIDsMissingVotes(ctx)
-	if err != nil {
-		return err
-	}
-	if len(pending) == 0 {
-		return nil
-	}
-
-	// Vote the featured bill up front so the homepage has content, but never
-	// block startup indefinitely on a slow provider.
-	featured := pending[0]
-	syncCtx, cancel := context.WithTimeout(ctx, syncTimeout)
-	if err := s.VoteBill(syncCtx, featured, false); err != nil {
-		s.logger.Printf("bootstrap vote for %s did not complete: %v", featured, err)
-	}
-	cancel()
-
 	go s.backfill(context.WithoutCancel(ctx))
 	return nil
 }
 
+// backfill collects the verdicts that are missing, one bill at a time, newest
+// first — so the featured bill is the first to fill in — and then sweeps the
+// corpus again for anything that failed. Serial per bill keeps a long run
+// predictable and easy to read in the log.
 func (s *Service) backfill(ctx context.Context) {
-	pending, err := s.store.BillIDsMissingVotes(ctx)
-	if err != nil {
-		s.logger.Printf("backfill: %v", err)
+	s.mu.Lock()
+	if s.backfilling {
+		s.mu.Unlock()
 		return
 	}
-	for _, id := range pending {
-		if ctx.Err() != nil {
+	s.backfilling = true
+	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		s.backfilling = false
+		s.mu.Unlock()
+	}()
+
+	for pass := 1; pass <= backfillPasses; pass++ {
+		pending, err := s.store.BillIDsMissingVotes(ctx)
+		if err != nil {
+			s.logger.Printf("backfill: %v", err)
 			return
 		}
-		if err := s.VoteBill(ctx, id, false); err != nil && !errors.Is(err, errAlreadyRunning) {
-			s.logger.Printf("backfill vote for %s failed: %v", id, err)
+		if len(pending) == 0 {
+			break
+		}
+		if pass > 1 {
+			s.logger.Printf("backfill pass %d: %d bill(s) still missing a verdict; retrying in %s",
+				pass, len(pending), s.retryDelay)
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(s.retryDelay):
+			}
+		} else {
+			s.logger.Printf("backfill: collecting verdicts for %d bill(s)", len(pending))
+		}
+
+		for _, id := range pending {
+			if ctx.Err() != nil {
+				return
+			}
+			if err := s.VoteBill(ctx, id, false); err != nil && !errors.Is(err, errAlreadyRunning) {
+				s.logger.Printf("backfill vote for %s failed: %v", id, err)
+			}
 		}
 	}
+
 	if err := s.scoreIdeologies(ctx); err != nil {
 		s.logger.Printf("ideology scoring: %v", err)
 	}
+	if remaining, err := s.store.BillIDsMissingVotes(ctx); err == nil && len(remaining) > 0 {
+		s.logger.Printf("backfill complete, but %d bill(s) still lack a full set of verdicts; POST /api/refresh to try again", len(remaining))
+		return
+	}
 	s.logger.Printf("backfill complete")
+}
+
+// StartRound collects a bill's verdicts in the background and reports whether
+// it started a round. Nothing waits on the result: the caller reads the cache
+// and polls, because a round can run for an hour.
+func (s *Service) StartRound(billID string, force bool) bool {
+	if !s.router.Enabled() || s.IsRunning(billID) {
+		return false
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), roundTimeout)
+		defer cancel()
+		if err := s.VoteBill(ctx, billID, force); err != nil && !errors.Is(err, errAlreadyRunning) {
+			s.logger.Printf("round for %s failed: %v", billID, err)
+		}
+	}()
+	return true
 }
 
 func (s *Service) loadBills(ctx context.Context) error {
@@ -205,20 +274,48 @@ func (s *Service) setSourceFromStore(ctx context.Context) {
 	s.mu.Unlock()
 }
 
-// Refresh re-reads the upstream bill list and votes anything new. It is safe to
-// call while the server is running.
-func (s *Service) Refresh(ctx context.Context) error {
-	if err := s.loadBills(ctx); err != nil {
-		return err
+// Refresh re-reads the upstream bill list and votes anything new, in the
+// background: reading a dozen bills' text from Congress.gov takes a while
+// before a single model is called, and no request should be held open for
+// either. It reports whether it started a refresh, or found one already
+// running.
+func (s *Service) Refresh() bool {
+	s.mu.Lock()
+	if s.refreshing {
+		s.mu.Unlock()
+		return false
 	}
-	go s.backfill(context.WithoutCancel(ctx))
-	return nil
+	s.refreshing = true
+	s.mu.Unlock()
+
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), roundTimeout)
+		defer cancel()
+		defer func() {
+			s.mu.Lock()
+			s.refreshing = false
+			s.mu.Unlock()
+		}()
+
+		if err := s.loadBills(ctx); err != nil {
+			s.logger.Printf("refresh: %v", err)
+			return
+		}
+		s.backfill(ctx)
+	}()
+	return true
 }
 
 var errAlreadyRunning = errors.New("a voting round is already in progress for this bill")
 
-// VoteBill collects verdicts for one bill. When force is true every model is
-// re-queried; otherwise only models without a recorded verdict are called.
+// VoteBill collects verdicts for one bill, running the full pipeline for each
+// model that needs one. When force is true every model starts over from a blank
+// page — fresh section notes, fresh memo, fresh vote — because that is what
+// asking for a re-run means; otherwise only models without a recorded verdict
+// are called, and they reuse the memo they already wrote for this text.
+//
+// It blocks until the round is done, which can be a long time. HTTP handlers
+// call StartRound instead.
 func (s *Service) VoteBill(ctx context.Context, billID string, force bool) error {
 	if !s.router.Enabled() {
 		return openrouter.ErrNoKey
@@ -272,7 +369,7 @@ func (s *Service) VoteBill(ctx context.Context, billID string, force bool) error
 				ModelName: m.Name,
 				CreatedAt: time.Now().UTC(),
 			}
-			verdict, err := s.decide(gctx, m, bill, &writeMu)
+			verdict, err := s.decide(gctx, m, bill, force, &writeMu)
 			if err != nil {
 				s.logger.Printf("vote %s/%s failed: %v", bill.ID, m.Key, err)
 				record.Vote = models.VoteError
@@ -309,9 +406,14 @@ func (s *Service) VoteBill(ctx context.Context, billID string, force bool) error
 // text overruns its context window — and then its vote on that memo.
 //
 // The memo is cached against a fingerprint of the text it was written from, so
-// a re-vote reuses the model's own reasoning instead of improvising a new one.
-func (s *Service) decide(ctx context.Context, m models.Model, bill models.Bill, writeMu *sync.Mutex) (openrouter.Verdict, error) {
-	memo, err := s.memo(ctx, m, bill, writeMu)
+// filling in a missing verdict reuses the model's own reasoning instead of
+// improvising a new one. A forced round rewrites it from the text.
+func (s *Service) decide(ctx context.Context, m models.Model, bill models.Bill, fresh bool, writeMu *sync.Mutex) (openrouter.Verdict, error) {
+	read := s.memo
+	if fresh {
+		read = s.freshMemo
+	}
+	memo, err := read(ctx, m, bill, writeMu)
 	if err != nil {
 		return openrouter.Verdict{}, err
 	}

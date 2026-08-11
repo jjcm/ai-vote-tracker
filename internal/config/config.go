@@ -28,7 +28,6 @@ type Config struct {
 	SiteURL           string
 	BootstrapBills    int
 	RequestTimeout    time.Duration
-	BootstrapTimeout  time.Duration
 	// ContextBudgetRatio is the share of a model's context window that statute
 	// text may fill before the bill is read section by section instead.
 	ContextBudgetRatio float64
@@ -56,11 +55,10 @@ func Load() (*Config, error) {
 		WebDir:         strings.TrimSpace(os.Getenv("WEB_DIR")),
 		SiteURL:        envStr("SITE_URL", ""),
 		BootstrapBills: envInt("BOOTSTRAP_BILLS", 12),
-		RequestTimeout: time.Duration(envInt("MODEL_TIMEOUT_SECONDS", 90)) * time.Second,
-		// A round is now at least two calls per model, and more when a bill has
-		// to be digested section by section, so the featured bill needs longer
-		// than a single completion's worth of patience.
-		BootstrapTimeout: time.Duration(envInt("BOOTSTRAP_TIMEOUT_SECONDS", 240)) * time.Second,
+		// Generous on purpose. A model digesting a section of a large bill is
+		// slow, nothing is waiting on it, and a timeout here throws away a
+		// whole deliberation.
+		RequestTimeout: time.Duration(envInt("MODEL_TIMEOUT_SECONDS", 300)) * time.Second,
 
 		ContextBudgetRatio: envFloat("CONTEXT_BUDGET_RATIO", 0.75),
 		ContextTokens:      envInt("MODEL_CONTEXT_TOKENS", 0),
