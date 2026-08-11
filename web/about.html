@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>About — AI Vote Tracker</title>
+    <meta name="description" content="Who makes AI Vote Tracker, and how the verdicts on this site are produced." />
+    <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=EB+Garamond:ital,wght@0,400;0,500;0,600;1,400&family=Inter:wght@400;500;600&family=Playfair+Display:wght@400;500;600&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/css/app.css" />
+    <script type="module" src="/js/main.js"></script>
+  </head>
+  <body>
+    <site-header current="about"></site-header>
+
+    <main>
+      <div class="shell">
+        <page-masthead
+          eyebrow="Colophon"
+          title="About This Record"
+          lead="A standing tally of how five language models would vote on the bills before Congress."
+        ></page-masthead>
+
+        <div class="about-grid">
+          <section class="panel prose">
+            <p>
+              Every bill on this site is put to five language models. Each one reads the bill title, the summary, and
+              an excerpt of the text, then returns a single binding answer — <strong>Yes</strong> or <strong>No</strong>
+              on final passage — with one sentence explaining the decisive consideration. There is no abstain option,
+              because a tally of maybes tells you nothing.
+            </p>
+            <p>
+              Verdicts are cached, so a model votes on a given bill once and that answer stands until the bill is
+              re-run. The alignment page multiplies those votes by an ideology score assigned to each bill and averages
+              the result into a single position between −1.0 and +1.0.
+            </p>
+            <h3>A caveat worth reading</h3>
+            <p>
+              These are model outputs, not endorsements, and not the positions of the organizations that build the
+              models. A different prompt, a different day, or a newer checkpoint can move a verdict. Read the site as a
+              record of what these systems said when asked, and nothing more.
+            </p>
+          </section>
+
+          <aside class="panel colophon">
+            <div class="colophon__row">
+              <span class="colophon__label">Made by</span>
+              <span class="colophon__value">
+                Jacob Miller — <a href="https://x.com/pwnies" rel="noopener">x.com/pwnies</a>
+              </span>
+            </div>
+            <div class="colophon__row">
+              <span class="colophon__label">Design</span>
+              <span class="colophon__value">Created with <a href="https://diffui.ai" rel="noopener">diffui.ai</a></span>
+            </div>
+            <div class="colophon__row">
+              <span class="colophon__label">Legislation</span>
+              <span class="colophon__value">Congress.gov API, with a built-in sample corpus as a fallback</span>
+            </div>
+            <div class="colophon__row">
+              <span class="colophon__label">Verdicts</span>
+              <span class="colophon__value">OpenRouter, one call per model per bill</span>
+            </div>
+            <div class="colophon__row">
+              <span class="colophon__label">Built with</span>
+              <span class="colophon__value">Go, SQLite, and native Web Components</span>
+            </div>
+          </aside>
+        </div>
+
+        <section-heading label="The Bench"></section-heading>
+        <model-roster></model-roster>
+      </div>
+    </main>
+
+    <site-footer></site-footer>
+  </body>
+</html>

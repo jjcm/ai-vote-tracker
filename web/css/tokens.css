@@ -1,0 +1,55 @@
+/* Design tokens sampled from the reference renders in assets/design/. */
+
+:root {
+  /* Paper and surfaces */
+  --paper: #fcf8ef;
+  --paper-header: #faf5ea;
+  --surface: #fdfaf3;
+  --surface-sunk: #f8f4ec;
+  --surface-tint: #f6f1e5;
+
+  /* Ink */
+  --ink: #101425;
+  --ink-soft: #3a3d45;
+  --ink-muted: #6f6a5f;
+  --ink-faint: #918a7c;
+
+  /* Flag palette */
+  --navy: #0a2a55;
+  --navy-deep: #052852;
+  --navy-soft: #2b4a76;
+  --red: #93211a;
+  --red-bright: #a3231a;
+  --red-deep: #8c1d17;
+  --green: #2f6a45;
+  --gold: #9e8e74;
+  --gold-deep: #857049;
+
+  /* Rules and borders */
+  --rule: #ded7c9;
+  --rule-soft: #e8e1d3;
+  --rule-strong: #cdc4b1;
+
+  /* Type */
+  --font-display: "Playfair Display", "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
+  --font-serif: "EB Garamond", "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
+  --font-sans: "Inter", "Helvetica Neue", Helvetica, Arial, sans-serif;
+
+  --fs-hero: clamp(2.9rem, 6.9vw, 6.2rem);
+  --fs-page-title: clamp(2.6rem, 6.2vw, 5.6rem);
+  --fs-verdict: clamp(2.4rem, 6.7vw, 6rem);
+  --fs-h2: clamp(1.6rem, 2.9vw, 2.5rem);
+  --fs-lead: clamp(1.15rem, 1.85vw, 1.6rem);
+  --fs-body: 1.125rem;
+  --fs-small: 1.0625rem;
+  --fs-mini: 0.9375rem;
+  --fs-micro: 0.75rem;
+
+  /* Layout */
+  --shell: 1440px;
+  --gutter: clamp(1.25rem, 4.3vw, 3.9rem);
+  --radius: 4px;
+  --radius-lg: 6px;
+  --shadow-card: 0 1px 2px rgba(30, 24, 12, 0.05), 0 12px 28px -22px rgba(30, 24, 12, 0.4);
+  --shadow-panel: 0 1px 2px rgba(30, 24, 12, 0.04);
+}

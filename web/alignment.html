@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Political Alignment — AI Vote Tracker</title>
+    <meta
+      name="description"
+      content="Where the tracked AI models sit on the -1.0 to +1.0 political spectrum, computed from their votes on scored legislation."
+    />
+    <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=EB+Garamond:ital,wght@0,400;0,500;0,600;1,400&family=Inter:wght@400;500;600&family=Playfair+Display:wght@400;500;600&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/css/app.css" />
+    <script type="module" src="/js/main.js"></script>
+  </head>
+  <body>
+    <site-header current="alignment"></site-header>
+
+    <main>
+      <div class="shell">
+        <page-masthead
+          eyebrow="Political Alignment"
+          title="Where AI Models Stand"
+          lead="We analyze how leading AI models vote across key legislation and plot their overall alignment on the political spectrum."
+        ></page-masthead>
+
+        <alignment-report></alignment-report>
+      </div>
+    </main>
+
+    <site-footer></site-footer>
+  </body>
+</html>
