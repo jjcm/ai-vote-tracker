@@ -18,6 +18,7 @@ import (
 	"net/url"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -41,6 +42,9 @@ type Client struct {
 	apiKey  string
 	http    *http.Client
 	logger  *log.Logger
+	// since is the oldest legislation the corpus covers. Bills that have not
+	// moved since then are not fetched at all.
+	since time.Time
 }
 
 // New builds a client. baseURL should include the /v3 suffix.
@@ -94,6 +98,17 @@ func (c *Client) WithLogger(logger *log.Logger) *Client {
 	return c
 }
 
+// WithSince fixes the analysis window: only legislation that has moved on or
+// after this date is fetched. A zero time keeps the old behaviour, which is to
+// widen the window until enough bills come back.
+func (c *Client) WithSince(t time.Time) *Client {
+	c.since = t.UTC()
+	return c
+}
+
+// Since reports the start of the analysis window, zero when none is set.
+func (c *Client) Since() time.Time { return c.since }
+
 // Enabled reports whether an API key is configured.
 func (c *Client) Enabled() bool { return c != nil && c.apiKey != "" }
 
@@ -136,7 +151,8 @@ type billResponse struct {
 			FullName string `json:"fullName"`
 			Party    string `json:"party"`
 		} `json:"sponsors"`
-		Title string `json:"title"`
+		Title      string `json:"title"`
+		UpdateDate string `json:"updateDate"`
 	} `json:"bill"`
 }
 
@@ -282,17 +298,28 @@ func (c *Client) RecentBills(ctx context.Context, limit int) ([]models.Bill, err
 	}
 
 	// Without fromDateTime the feed only returns the handful of summaries
-	// updated in the last few hours. Widen the window until enough bills whose
-	// text has actually been published come back: text lags introduction by
-	// days, so recency alone does not fill a page.
+	// updated in the last few hours. With an analysis window there is one
+	// window and it is the window; without one, widen it until enough bills
+	// whose text has actually been published come back, because text lags
+	// introduction by days and recency alone does not fill a page.
+	windows := []time.Time{}
+	if !c.since.IsZero() {
+		windows = append(windows, c.since)
+	} else {
+		now := time.Now().UTC()
+		for _, back := range []time.Duration{45 * 24 * time.Hour, 180 * 24 * time.Hour, 3 * 365 * 24 * time.Hour} {
+			windows = append(windows, now.Add(-back))
+		}
+	}
+
 	attempted := map[string]bool{}
 	var out []models.Bill
-	for _, window := range []time.Duration{45 * 24 * time.Hour, 180 * 24 * time.Hour, 3 * 365 * 24 * time.Hour} {
+	for _, from := range windows {
 		var feed summariesResponse
 		err := c.get(ctx, "/summaries", url.Values{
 			"sort":         {"updateDate desc"},
 			"limit":        {"250"},
-			"fromDateTime": {time.Now().UTC().Add(-window).Format("2006-01-02T15:04:05Z")},
+			"fromDateTime": {from.Format("2006-01-02T15:04:05Z")},
 		}, &feed)
 		if err != nil {
 			return nil, err
@@ -307,6 +334,140 @@ func (c *Client) RecentBills(ctx context.Context, limit int) ([]models.Bill, err
 		return nil, fmt.Errorf("congress: no bills with published text in the summaries feed")
 	}
 	return out, nil
+}
+
+// BillsByID fetches specific bills by their corpus identifier — the
+// "hr-8884-119" shape this package mints — with their statute text, skipping
+// any whose text Congress has not published. It is how the corpus picks up the
+// bills that actually reached a floor vote, which the summaries feed alone
+// does not guarantee.
+func (c *Client) BillsByID(ctx context.Context, ids []string) ([]models.Bill, error) {
+	if !c.Enabled() {
+		return nil, fmt.Errorf("congress: CONGRESS_API_KEY is not set")
+	}
+	seen := map[string]bool{}
+	out := make([]models.Bill, 0, len(ids))
+	for _, id := range ids {
+		if ctx.Err() != nil {
+			return out, ctx.Err()
+		}
+		if seen[id] {
+			continue
+		}
+		seen[id] = true
+		congress, billType, number, ok := parseBillID(id)
+		if !ok {
+			c.logf("congress: %q is not a bill identifier this client understands", id)
+			continue
+		}
+		bill, err := c.billByNumber(ctx, congress, billType, number)
+		if err != nil {
+			c.logf("congress: skipping %s: %v", id, err)
+			continue
+		}
+		out = append(out, bill)
+	}
+	return out, nil
+}
+
+// billByNumber assembles one bill from its detail record, its newest CRS
+// summary and its statute text.
+func (c *Client) billByNumber(ctx context.Context, congress int, billType, number string) (models.Bill, error) {
+	detail, err := c.billDetail(ctx, congress, billType, number)
+	if err != nil {
+		return models.Bill{}, err
+	}
+	title := strings.TrimSpace(detail.Bill.Title)
+	if title == "" {
+		return models.Bill{}, fmt.Errorf("congress: %s%s has no title, so the record is not readable yet", billType, number)
+	}
+	if isCommemorative(title) {
+		return models.Bill{}, fmt.Errorf("congress: %s%s is a naming or commemorative bill", billType, number)
+	}
+
+	text, err := c.statuteText(ctx, congress, billType, number)
+	if err != nil {
+		return models.Bill{}, err
+	}
+	c.logf("congress: %s-%s-%d read the %s text as %s (%d chars) from %s",
+		strings.ToLower(billType), number, congress, text.Version, text.Format, len(text.Text), text.URL)
+
+	chamber, display := models.ChamberHouse, "H.R. "+number
+	if strings.EqualFold(billType, "S") {
+		chamber, display = models.ChamberSenate, "S. "+number
+	}
+	// As in the feed path: the CRS summary opens by restating the short title
+	// the card prints above it, and that echo is dropped before clipping so the
+	// card's character budget goes to the summary.
+	summary := models.SummaryWithoutTitleEcho(title, c.latestSummary(ctx, congress, billType, number))
+	bill := models.Bill{
+		ID:             fmt.Sprintf("%s-%s-%d", strings.ToLower(billType), number, congress),
+		Number:         display,
+		Title:          title,
+		Chamber:        chamber,
+		Summary:        shorten(summary, 460),
+		FullText:       text.Text,
+		TextSource:     text.Source,
+		TextFormat:     text.Format,
+		TextVersion:    text.Version,
+		TextURL:        text.URL,
+		Status:         detail.Bill.LatestAction.Text,
+		PolicyArea:     detail.Bill.PolicyArea.Name,
+		Source:         models.SourceCongress,
+		SourceURL:      legislationURL(congress, billType, number),
+		IntroducedDate: parseTime(detail.Bill.IntroducedDate),
+		UpdatedAt:      parseTime(detail.Bill.UpdateDate),
+	}
+	if len(detail.Bill.Sponsors) > 0 {
+		bill.Sponsor = detail.Bill.Sponsors[0].FullName
+		bill.SponsorParty = detail.Bill.Sponsors[0].Party
+	}
+	if detail.Bill.LegislationURL != "" {
+		bill.SourceURL = detail.Bill.LegislationURL
+	}
+	if bill.UpdatedAt.IsZero() {
+		bill.UpdatedAt = parseTime(detail.Bill.LatestAction.ActionDate)
+	}
+	if bill.UpdatedAt.IsZero() {
+		bill.UpdatedAt = bill.IntroducedDate
+	}
+	bill.StatusCategory = models.StatusCategory(bill.Status)
+	return bill, nil
+}
+
+// latestSummary returns the newest CRS summary for a bill, which the cards
+// read better with. No model is ever shown it.
+func (c *Client) latestSummary(ctx context.Context, congress int, billType, number string) string {
+	var feed summariesResponse
+	path := fmt.Sprintf("/bill/%d/%s/%s/summaries", congress, strings.ToLower(billType), number)
+	if err := c.get(ctx, path, nil, &feed); err != nil || len(feed.Summaries) == 0 {
+		return ""
+	}
+	newest, at := "", time.Time{}
+	for _, s := range feed.Summaries {
+		when := parseTime(s.UpdateDate)
+		if when.IsZero() {
+			when = parseTime(s.ActionDate)
+		}
+		if newest == "" || !when.Before(at) {
+			newest, at = stripHTML(s.Text), when
+		}
+	}
+	return newest
+}
+
+var billIDRE = regexp.MustCompile(`^(hr|s)-(\d+)-(\d+)$`)
+
+func parseBillID(id string) (congress int, billType, number string, ok bool) {
+	m := billIDRE.FindStringSubmatch(strings.ToLower(strings.TrimSpace(id)))
+	if m == nil {
+		return 0, "", "", false
+	}
+	congress, err := strconv.Atoi(m[3])
+	if err != nil {
+		return 0, "", "", false
+	}
+	return congress, strings.ToUpper(m[1]), m[2], true
 }
 
 // readBills turns feed entries into bills, downloading the statute text for

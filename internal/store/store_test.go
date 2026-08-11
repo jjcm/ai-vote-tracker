@@ -3,8 +3,10 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/pwnies/ai-vote-tracker/internal/models"
 )
@@ -318,5 +320,173 @@ INSERT INTO votes (bill_id, model_key, vote, reason) VALUES ('s-1264', 'grok', '
 	}
 	if n, err := again.CountBills(ctx); err != nil || n != 1 {
 		t.Errorf("bills = %d (err %v), want the statute-era corpus kept", n, err)
+	}
+}
+
+func memberVote(billID, bioguide, position string, day int) models.MemberVote {
+	return models.MemberVote{
+		BillID:   billID,
+		Bioguide: bioguide,
+		Chamber:  models.ChamberHouse,
+		Position: position,
+		RollCall: "house-2026-283",
+		Question: "On Passage",
+		VotedAt:  time.Date(2026, 7, day, 0, 0, 0, 0, time.UTC),
+	}
+}
+
+// A member can be recorded on the same bill twice — passage, and then
+// concurring in the other chamber's text — and the later vote is the position
+// that stands.
+func TestMemberVotesKeepTheLatestPosition(t *testing.T) {
+	ctx := context.Background()
+	st := newStore(t)
+
+	if _, err := st.UpsertBill(ctx, statuteBill("hr-8884-119")); err != nil {
+		t.Fatalf("UpsertBill: %v", err)
+	}
+	for _, mv := range []models.MemberVote{
+		memberVote("hr-8884-119", "O000172", models.PositionYea, 23),
+		memberVote("hr-8884-119", "O000172", models.PositionNay, 30),
+		memberVote("hr-8884-119", "O000172", models.PositionPresent, 1),
+	} {
+		if err := st.SaveMemberVote(ctx, mv); err != nil {
+			t.Fatalf("SaveMemberVote: %v", err)
+		}
+	}
+
+	stored, err := st.MemberVotes(ctx)
+	if err != nil {
+		t.Fatalf("MemberVotes: %v", err)
+	}
+	if len(stored) != 1 {
+		t.Fatalf("got %d rows, want one per member and bill", len(stored))
+	}
+	if stored[0].Position != models.PositionNay {
+		t.Errorf("position = %q, want the July 30 vote to stand over the earlier one", stored[0].Position)
+	}
+	if !stored[0].Decided() {
+		t.Error("a Nay is a side")
+	}
+}
+
+// A window that moves on leaves positions behind for bills that are no longer
+// tracked. They are dropped, and so is the record of having read the roll call
+// they came from — otherwise a bill that comes back into the window is skipped
+// as already seen while carrying no positions at all.
+func TestFloorVotesForDroppedBillsArePurged(t *testing.T) {
+	ctx := context.Background()
+	st := newStore(t)
+
+	if _, err := st.UpsertBill(ctx, statuteBill("hr-8884-119")); err != nil {
+		t.Fatalf("UpsertBill: %v", err)
+	}
+	for _, mv := range []models.MemberVote{
+		memberVote("hr-8884-119", "O000172", models.PositionYea, 23),
+		memberVote("hr-1-118", "M001184", models.PositionNay, 23),
+	} {
+		if err := st.SaveMemberVote(ctx, mv); err != nil {
+			t.Fatalf("SaveMemberVote: %v", err)
+		}
+	}
+	for _, rc := range []RollCall{
+		{ID: "house-2026-283", BillID: "hr-8884-119"},
+		{ID: "house-2024-100", BillID: "hr-1-118"},
+	} {
+		if err := st.SaveRollCall(ctx, rc); err != nil {
+			t.Fatalf("SaveRollCall: %v", err)
+		}
+	}
+
+	dropped, err := st.PurgeOrphanFloorVotes(ctx)
+	if err != nil {
+		t.Fatalf("PurgeOrphanFloorVotes: %v", err)
+	}
+	if dropped != 1 {
+		t.Errorf("dropped %d, want the one orphan", dropped)
+	}
+	stored, err := st.MemberVotes(ctx)
+	if err != nil || len(stored) != 1 || stored[0].BillID != "hr-8884-119" {
+		t.Errorf("remaining = %+v (%v)", stored, err)
+	}
+	known, err := st.KnownRollCalls(ctx)
+	if err != nil || known["house-2024-100"] || !known["house-2026-283"] {
+		t.Errorf("known roll calls = %v (%v)", known, err)
+	}
+}
+
+func TestRollCallsAreOnlyReadOnce(t *testing.T) {
+	ctx := context.Background()
+	st := newStore(t)
+
+	known, err := st.KnownRollCalls(ctx)
+	if err != nil || len(known) != 0 {
+		t.Fatalf("a fresh database knows no roll calls: %v %v", known, err)
+	}
+	rc := RollCall{ID: "house-2026-283", Chamber: models.ChamberHouse, BillID: "hr-8884-119",
+		Question: "On Passage", VotedAt: time.Date(2026, 7, 23, 0, 0, 0, 0, time.UTC), Members: 3}
+	if err := st.SaveRollCall(ctx, rc); err != nil {
+		t.Fatalf("SaveRollCall: %v", err)
+	}
+	if err := st.SaveRollCall(ctx, rc); err != nil {
+		t.Fatalf("re-recording a roll call should be harmless: %v", err)
+	}
+	known, err = st.KnownRollCalls(ctx)
+	if err != nil || !known["house-2026-283"] || len(known) != 1 {
+		t.Errorf("known = %v (%v)", known, err)
+	}
+}
+
+// The agreement table is served from the cache only while the verdicts and
+// floor votes behind it are the ones it was computed from.
+func TestContenderCacheIsKeyedToItsInputs(t *testing.T) {
+	ctx := context.Background()
+	st := newStore(t)
+
+	if _, err := st.CachedContenders(ctx, "sig-1"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("an empty cache should miss, got %v", err)
+	}
+	if err := st.SaveContenders(ctx, "sig-1", []byte(`{"models":[]}`)); err != nil {
+		t.Fatalf("SaveContenders: %v", err)
+	}
+	payload, err := st.CachedContenders(ctx, "sig-1")
+	if err != nil || string(payload) != `{"models":[]}` {
+		t.Errorf("cached payload = %q (%v)", payload, err)
+	}
+
+	// New inputs mean a new signature, and the entry they replace is not worth
+	// keeping: nothing will ever ask for it again.
+	if err := st.SaveContenders(ctx, "sig-2", []byte(`{"models":[1]}`)); err != nil {
+		t.Fatalf("SaveContenders: %v", err)
+	}
+	if _, err := st.CachedContenders(ctx, "sig-1"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("the superseded entry should be gone, got %v", err)
+	}
+}
+
+func TestContenderInputsSummariseTheData(t *testing.T) {
+	ctx := context.Background()
+	st := newStore(t)
+
+	if _, err := st.UpsertBill(ctx, statuteBill("hr-8884-119")); err != nil {
+		t.Fatalf("UpsertBill: %v", err)
+	}
+	if err := st.SaveVote(ctx, models.Vote{BillID: "hr-8884-119", ModelKey: "opus", Vote: models.VoteYes,
+		CreatedAt: time.Unix(1700, 0)}); err != nil {
+		t.Fatalf("SaveVote: %v", err)
+	}
+	if err := st.SaveMemberVote(ctx, memberVote("hr-8884-119", "O000172", models.PositionYea, 23)); err != nil {
+		t.Fatalf("SaveMemberVote: %v", err)
+	}
+
+	in, err := st.ContenderInputs(ctx)
+	if err != nil {
+		t.Fatalf("ContenderInputs: %v", err)
+	}
+	if in.ModelVotes != 1 || in.ModelVotesAt != 1700 {
+		t.Errorf("model verdicts = %d at %d", in.ModelVotes, in.ModelVotesAt)
+	}
+	if in.MemberVotes != 1 || in.MemberVotesAt == 0 {
+		t.Errorf("floor votes = %d at %d", in.MemberVotes, in.MemberVotesAt)
 	}
 }

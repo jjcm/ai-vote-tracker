@@ -18,6 +18,7 @@ import (
 	"github.com/pwnies/ai-vote-tracker/internal/congress"
 	"github.com/pwnies/ai-vote-tracker/internal/httpapi"
 	"github.com/pwnies/ai-vote-tracker/internal/openrouter"
+	"github.com/pwnies/ai-vote-tracker/internal/rollcall"
 	"github.com/pwnies/ai-vote-tracker/internal/store"
 	"github.com/pwnies/ai-vote-tracker/internal/votes"
 )
@@ -58,8 +59,14 @@ func run(logger *log.Logger) error {
 		WithContextBudget(cfg.ContextBudgetRatio, cfg.ContextTokens)
 	cg := congress.New(cfg.CongressBaseURL, cfg.CongressAPIKey).
 		WithLogger(logger).
+		WithUserAgent(cfg.CongressUserAgent).
+		WithSince(cfg.BillsSince)
+	// The House Clerk and the Senate publish their roll calls without a key,
+	// so member positions are read whether or not Congress.gov is configured.
+	rolls := rollcall.New().
+		WithLogger(logger).
 		WithUserAgent(cfg.CongressUserAgent)
-	svc := votes.New(st, router, cg, cfg.BootstrapBills, logger)
+	svc := votes.New(st, router, cg, cfg.BootstrapBills, logger).WithRollCall(rolls)
 
 	if cfg.ContextTokens > 0 {
 		logger.Printf("MODEL_CONTEXT_TOKENS=%d overrides every model's context window", cfg.ContextTokens)
@@ -71,6 +78,7 @@ func run(logger *log.Logger) error {
 	if !cfg.HasCongress() {
 		logger.Printf("CONGRESS_API_KEY is not set — using the built-in seed corpus")
 	}
+	logger.Printf("analysis window: legislation and floor votes since %s", cfg.BillsSince.Format("2006-01-02"))
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -83,7 +91,7 @@ func run(logger *log.Logger) error {
 
 	srv := &http.Server{
 		Addr:              cfg.Addr(),
-		Handler:           httpapi.New(st, svc, web, logger).Handler(),
+		Handler:           httpapi.New(st, svc, web, logger).WithContenderOverlap(cfg.ContenderMinOverlap).Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 

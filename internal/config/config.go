@@ -12,6 +12,12 @@ import (
 	"github.com/joho/godotenv"
 )
 
+// DefaultBillsSince is the start of the analysis window the site ships with:
+// the term's second session, which is the stretch of legislation the 2028
+// contender comparison on the alignment page is drawn from. BILLS_SINCE moves
+// it.
+const DefaultBillsSince = "2026-06-01"
+
 // Config holds every runtime knob the server understands.
 type Config struct {
 	Host            string
@@ -28,6 +34,13 @@ type Config struct {
 	SiteURL           string
 	BootstrapBills    int
 	RequestTimeout    time.Duration
+	// BillsSince is the start of the analysis window: the corpus, the model
+	// verdicts and the congressional roll calls all cover legislation that has
+	// moved on or after this date.
+	BillsSince time.Time
+	// ContenderMinOverlap is how many bills a model and a member must both
+	// have taken a binary position on before the pair is ranked.
+	ContenderMinOverlap int
 	// ContextBudgetRatio is the share of a model's context window that statute
 	// text may fill before the bill is read section by section instead.
 	ContextBudgetRatio float64
@@ -51,10 +64,14 @@ func Load() (*Config, error) {
 
 		CongressUserAgent: strings.TrimSpace(os.Getenv("CONGRESS_USER_AGENT")),
 
-		DatabasePath:   envStr("DATABASE_PATH", "data/aivotes.db"),
-		WebDir:         strings.TrimSpace(os.Getenv("WEB_DIR")),
-		SiteURL:        envStr("SITE_URL", ""),
-		BootstrapBills: envInt("BOOTSTRAP_BILLS", 12),
+		DatabasePath: envStr("DATABASE_PATH", "data/aivotes.db"),
+		WebDir:       strings.TrimSpace(os.Getenv("WEB_DIR")),
+		SiteURL:      envStr("SITE_URL", ""),
+		// The corpus has to be wide enough that a model and a member of
+		// Congress share several bills, or every comparison on the alignment
+		// page falls below the overlap floor and says so.
+		BootstrapBills:      envInt("BOOTSTRAP_BILLS", 40),
+		ContenderMinOverlap: envInt("CONTENDER_MIN_OVERLAP", 3),
 		// Generous on purpose. A model digesting a section of a large bill is
 		// slow, nothing is waiting on it, and a timeout here throws away a
 		// whole deliberation.
@@ -69,6 +86,15 @@ func Load() (*Config, error) {
 	}
 	if cfg.ContextBudgetRatio <= 0 || cfg.ContextBudgetRatio > 1 {
 		return nil, fmt.Errorf("CONTEXT_BUDGET_RATIO must be between 0 and 1, got %v", cfg.ContextBudgetRatio)
+	}
+
+	since, err := envDate("BILLS_SINCE", DefaultBillsSince)
+	if err != nil {
+		return nil, err
+	}
+	cfg.BillsSince = since
+	if cfg.ContenderMinOverlap < 1 {
+		return nil, fmt.Errorf("CONTENDER_MIN_OVERLAP must be at least 1, got %d", cfg.ContenderMinOverlap)
 	}
 	cfg.OpenRouterURL = strings.TrimRight(cfg.OpenRouterURL, "/")
 	cfg.CongressBaseURL = strings.TrimRight(cfg.CongressBaseURL, "/")
@@ -101,6 +127,24 @@ func envInt(key string, fallback int) int {
 		return fallback
 	}
 	return n
+}
+
+// envDate reads a YYYY-MM-DD variable. A malformed date is an error rather
+// than a silent fallback: a window quietly set to the wrong year would show
+// the wrong bills without saying so.
+func envDate(key, fallback string) (time.Time, error) {
+	v := strings.TrimSpace(os.Getenv(key))
+	if v == "" {
+		v = fallback
+	}
+	if v == "" {
+		return time.Time{}, nil
+	}
+	t, err := time.Parse("2006-01-02", v)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("%s must be a YYYY-MM-DD date, got %q", key, v)
+	}
+	return t.UTC(), nil
 }
 
 func envFloat(key string, fallback float64) float64 {

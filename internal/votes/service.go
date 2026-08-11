@@ -13,8 +13,10 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"github.com/pwnies/ai-vote-tracker/internal/congress"
+	"github.com/pwnies/ai-vote-tracker/internal/contenders"
 	"github.com/pwnies/ai-vote-tracker/internal/models"
 	"github.com/pwnies/ai-vote-tracker/internal/openrouter"
+	"github.com/pwnies/ai-vote-tracker/internal/rollcall"
 	"github.com/pwnies/ai-vote-tracker/internal/seed"
 	"github.com/pwnies/ai-vote-tracker/internal/store"
 )
@@ -44,19 +46,24 @@ type Service struct {
 	store    *store.Store
 	router   *openrouter.Client
 	congress *congress.Client
+	rollcall *rollcall.Client
 	logger   *log.Logger
 
 	billLimit int
+	// since is the start of the analysis window: the corpus and the floor
+	// votes it is compared against both begin here.
+	since time.Time
 
 	// retryDelay paces the backfill's extra sweeps. It is a field so tests do
 	// not have to wait out a production-sized pause.
 	retryDelay time.Duration
 
-	mu          sync.Mutex
-	inFlight    map[string]bool
-	source      string
-	backfilling bool
-	refreshing  bool
+	mu           sync.Mutex
+	inFlight     map[string]bool
+	source       string
+	backfilling  bool
+	refreshing   bool
+	syncingVotes bool
 }
 
 // New builds the service. congressClient may be disabled, in which case the
@@ -69,13 +76,27 @@ func New(st *store.Store, router *openrouter.Client, cg *congress.Client, billLi
 		store:      st,
 		router:     router,
 		congress:   cg,
+		rollcall:   rollcall.New(),
 		logger:     logger,
 		billLimit:  billLimit,
+		since:      cg.Since(),
 		retryDelay: backfillRetryDelay,
 		inFlight:   map[string]bool{},
 		source:     models.SourceSeed,
 	}
 }
+
+// WithRollCall replaces the client that reads member positions from the House
+// Clerk and the Senate, which is how tests point it at fixtures.
+func (s *Service) WithRollCall(c *rollcall.Client) *Service {
+	if c != nil {
+		s.rollcall = c
+	}
+	return s
+}
+
+// Since reports the start of the analysis window.
+func (s *Service) Since() time.Time { return s.since }
 
 // Status describes the current data pipeline state for the UI.
 type Status struct {
@@ -84,19 +105,29 @@ type Status struct {
 	CongressEnabled bool   `json:"congressEnabled"`
 	BillsInFlight   int    `json:"billsInFlight"`
 	Backfilling     bool   `json:"backfilling"`
+	// ReadingFloorVotes is true while member positions are being collected
+	// from the House Clerk and the Senate.
+	ReadingFloorVotes bool `json:"readingFloorVotes"`
+	// BillsSince is the start of the analysis window, as a date.
+	BillsSince string `json:"billsSince,omitempty"`
 }
 
 // Status returns the current pipeline state.
 func (s *Service) Status() Status {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return Status{
-		Source:          s.source,
-		VotingEnabled:   s.router.Enabled(),
-		CongressEnabled: s.congress.Enabled(),
-		BillsInFlight:   len(s.inFlight),
-		Backfilling:     s.backfilling || s.refreshing,
+	status := Status{
+		Source:            s.source,
+		VotingEnabled:     s.router.Enabled(),
+		CongressEnabled:   s.congress.Enabled(),
+		BillsInFlight:     len(s.inFlight),
+		Backfilling:       s.backfilling || s.refreshing,
+		ReadingFloorVotes: s.syncingVotes,
 	}
+	if !s.since.IsZero() {
+		status.BillsSince = s.since.Format("2006-01-02")
+	}
+	return status
 }
 
 // Bootstrap loads bills if the database is empty and hands the collecting of
@@ -121,6 +152,10 @@ func (s *Service) Bootstrap(ctx context.Context) error {
 	} else if purged > 0 {
 		s.logger.Printf("dropped %d verdict(s) with a malformed rationale; they will be re-collected", purged)
 	}
+
+	// Reading the roll calls needs no API key and nothing waits on it, so it
+	// runs in the background whether or not the models are voting.
+	go s.SyncFloorVotes(context.WithoutCancel(ctx))
 
 	if !s.router.Enabled() {
 		s.logger.Printf("OPENROUTER_KEY is not set: bills are loaded but no model votes will be collected")
@@ -212,7 +247,11 @@ func (s *Service) loadBills(ctx context.Context) error {
 	source := models.SourceSeed
 
 	if s.congress.Enabled() {
-		live, err := s.congress.RecentBills(ctx, s.billLimit)
+		// The floor votes are indexed first because they decide which bills
+		// are worth having: a bill the House or Senate actually passed is one
+		// a model verdict can be compared against a member's, and one that
+		// never left committee is not.
+		live, err := s.liveBills(ctx, s.floorVotes(ctx))
 		if err != nil {
 			s.logger.Printf("congress.gov fetch failed, falling back to the seed corpus: %v", err)
 		} else {
@@ -249,6 +288,161 @@ func (s *Service) loadBills(ctx context.Context) error {
 		s.logger.Printf("loaded %d seed bills (set CONGRESS_API_KEY for live Congress.gov data)", len(bills))
 	}
 	return nil
+}
+
+// SyncFloorVotes reads how the 2028 watch list voted on the bills in the
+// corpus. It is safe to call repeatedly: the index is cheap and a roll call is
+// only downloaded the first time it is seen.
+func (s *Service) SyncFloorVotes(ctx context.Context) {
+	s.mu.Lock()
+	if s.syncingVotes {
+		s.mu.Unlock()
+		return
+	}
+	s.syncingVotes = true
+	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		s.syncingVotes = false
+		s.mu.Unlock()
+	}()
+	s.ingestPositions(ctx, s.floorVotes(ctx))
+}
+
+// liveBills assembles the corpus for the analysis window. Bills that reached a
+// recorded vote on final passage come first, newest vote first, because they
+// are the only ones a model's verdict can be measured against a member of
+// Congress's. The summaries feed then tops the list up to the limit with
+// whatever else has moved in the window.
+func (s *Service) liveBills(ctx context.Context, floor []rollcall.Vote) ([]models.Bill, error) {
+	var out []models.Bill
+	seen := map[string]bool{}
+
+	var wanted []string
+	for i := len(floor) - 1; i >= 0 && len(wanted) < s.billLimit; i-- {
+		if id := floor[i].BillID; !seen[id] {
+			seen[id] = true
+			wanted = append(wanted, id)
+		}
+	}
+	if len(wanted) > 0 {
+		voted, err := s.congress.BillsByID(ctx, wanted)
+		if err != nil {
+			s.logger.Printf("reading the bills that reached a floor vote: %v", err)
+		}
+		out = append(out, voted...)
+		s.logger.Printf("%d of %d bill(s) with a final-passage vote since %s carry published text",
+			len(out), len(wanted), s.since.Format("2006-01-02"))
+	}
+
+	if len(out) >= s.billLimit {
+		return out[:s.billLimit], nil
+	}
+	recent, err := s.congress.RecentBills(ctx, s.billLimit-len(out))
+	if err != nil {
+		// A corpus of bills that were actually voted on is still a corpus.
+		if len(out) > 0 {
+			s.logger.Printf("topping the corpus up from the summaries feed failed: %v", err)
+			return out, nil
+		}
+		return nil, err
+	}
+	for _, b := range recent {
+		if !seen[b.ID] {
+			seen[b.ID] = true
+			out = append(out, b)
+		}
+	}
+	return out, nil
+}
+
+// floorVotes indexes every final-passage roll call in the analysis window. A
+// failure here is not fatal: the site still tracks bills and model verdicts,
+// it just cannot say who in Congress voted the same way.
+func (s *Service) floorVotes(ctx context.Context) []rollcall.Vote {
+	if s.since.IsZero() {
+		return nil
+	}
+	votes, err := s.rollcall.FinalPassageVotes(ctx, s.since)
+	if err != nil {
+		s.logger.Printf("indexing congressional roll calls since %s failed: %v", s.since.Format("2006-01-02"), err)
+		return nil
+	}
+	return votes
+}
+
+// ingestPositions reads how the members on the 2028 watch list voted on each
+// bill in the corpus, and caches it. Roll calls already read are skipped, so a
+// second run costs one index fetch rather than a download per vote.
+func (s *Service) ingestPositions(ctx context.Context, floor []rollcall.Vote) {
+	if len(floor) == 0 {
+		return
+	}
+	stored, err := s.store.Bills(ctx)
+	if err != nil {
+		s.logger.Printf("roll call ingest: %v", err)
+		return
+	}
+	corpus := make(map[string]bool, len(stored))
+	for _, b := range stored {
+		corpus[b.ID] = true
+	}
+	known, err := s.store.KnownRollCalls(ctx)
+	if err != nil {
+		s.logger.Printf("roll call ingest: %v", err)
+		return
+	}
+
+	rolls, positions := 0, 0
+	for _, v := range floor {
+		if ctx.Err() != nil {
+			return
+		}
+		if !corpus[v.BillID] || known[v.ID()] {
+			continue
+		}
+		members, err := s.rollcall.Positions(ctx, v)
+		if err != nil {
+			s.logger.Printf("roll call %s on %s: %v", v.ID(), v.BillID, err)
+			continue
+		}
+		matched := 0
+		for _, p := range members {
+			candidate, ok := contenders.Resolve(v.Chamber, p.MemberID, p.Surname, p.State)
+			if !ok {
+				continue
+			}
+			matched++
+			err := s.store.SaveMemberVote(ctx, models.MemberVote{
+				BillID:    v.BillID,
+				Bioguide:  candidate.Bioguide,
+				Chamber:   v.Chamber,
+				Position:  p.Cast,
+				RollCall:  v.ID(),
+				Question:  v.Question,
+				SourceURL: v.URL,
+				VotedAt:   v.Date,
+			})
+			if err != nil {
+				s.logger.Printf("storing %s on %s: %v", candidate.Name, v.BillID, err)
+			}
+		}
+		if err := s.store.SaveRollCall(ctx, store.RollCall{
+			ID: v.ID(), Chamber: v.Chamber, BillID: v.BillID,
+			Question: v.Question, VotedAt: v.Date, Members: matched,
+		}); err != nil {
+			s.logger.Printf("recording roll call %s: %v", v.ID(), err)
+		}
+		rolls++
+		positions += matched
+	}
+
+	if orphans, err := s.store.PurgeOrphanFloorVotes(ctx); err == nil && orphans > 0 {
+		s.logger.Printf("dropped %d floor vote(s) for bills no longer in the window", orphans)
+	}
+	if rolls > 0 {
+		s.logger.Printf("read %d roll call(s) and %d watch-list position(s) from the House Clerk and the Senate", rolls, positions)
+	}
 }
 
 // invalidate drops every model's reading of a bill whose statute text changed.
@@ -301,6 +495,7 @@ func (s *Service) Refresh() bool {
 			s.logger.Printf("refresh: %v", err)
 			return
 		}
+		s.SyncFloorVotes(ctx)
 		s.backfill(ctx)
 	}()
 	return true

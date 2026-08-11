@@ -334,3 +334,86 @@ func TestBillDetailWithholdsTheStatuteTextUnlessAsked(t *testing.T) {
 		t.Errorf("fullText = %v, want the statute text", text)
 	}
 }
+
+// The alignment payload carries the 2028 comparison the page renders, and the
+// potentials who are floated for the office but hold no seat.
+func TestAlignmentCarriesContenderMatches(t *testing.T) {
+	ctx := context.Background()
+	h, st := newServer(t)
+
+	for i, id := range []string{"hr-1-119", "hr-2-119", "hr-3-119"} {
+		bill := models.Bill{ID: id, Number: strings.ToUpper(id), Title: "A tracked bill",
+			Chamber: models.ChamberHouse, FullText: "<section/>", TextSource: models.TextSourceCongressXML,
+			UpdatedAt: time.Date(2026, 7, i+1, 0, 0, 0, 0, time.UTC)}
+		if _, err := st.UpsertBill(ctx, bill); err != nil {
+			t.Fatalf("UpsertBill: %v", err)
+		}
+		if err := st.SaveVote(ctx, models.Vote{BillID: id, ModelKey: "opus", Vote: models.VoteYes,
+			CreatedAt: time.Unix(int64(1700+i), 0)}); err != nil {
+			t.Fatalf("SaveVote: %v", err)
+		}
+		// Ocasio-Cortez is on the record for all three and splits on the last.
+		position := models.PositionYea
+		if i == 2 {
+			position = models.PositionNay
+		}
+		if err := st.SaveMemberVote(ctx, models.MemberVote{BillID: id, Bioguide: "O000172",
+			Chamber: models.ChamberHouse, Position: position,
+			VotedAt: time.Date(2026, 7, i+1, 0, 0, 0, 0, time.UTC)}); err != nil {
+			t.Fatalf("SaveMemberVote: %v", err)
+		}
+	}
+
+	rec, payload, _ := do(t, h, http.MethodGet, "/api/alignment")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	matches, ok := payload["contenderMatches"].(map[string]any)
+	if !ok {
+		t.Fatalf("the alignment payload carries no contenderMatches: %v", payload)
+	}
+	if got := matches["minOverlap"]; got != float64(3) {
+		t.Errorf("minOverlap = %v, want the default of 3", got)
+	}
+	if got := matches["memberPositions"]; got != float64(3) {
+		t.Errorf("memberPositions = %v, want 3", got)
+	}
+	if outsiders, _ := matches["notInCongress"].([]any); len(outsiders) == 0 {
+		t.Error("the potentials with no seat should be named, so the page can say why they carry no score")
+	}
+
+	closest := closestFor(t, matches, "opus")
+	if closest["name"] != "Alexandria Ocasio-Cortez" {
+		t.Errorf("closest = %v", closest["name"])
+	}
+	if closest["overlap"] != float64(3) || closest["agreed"] != float64(2) {
+		t.Errorf("closest agreed on %v of %v, want 2 of 3", closest["agreed"], closest["overlap"])
+	}
+
+	// The second request is served from the table the first one cached, and
+	// has to say the same thing.
+	_, repeat, _ := do(t, h, http.MethodGet, "/api/alignment")
+	again := closestFor(t, repeat["contenderMatches"].(map[string]any), "opus")
+	if again["name"] != closest["name"] || again["agreement"] != closest["agreement"] {
+		t.Errorf("the cached table disagrees with the one that was computed: %v vs %v", again, closest)
+	}
+}
+
+// closestFor digs one model's best-matching member out of the JSON payload.
+func closestFor(t *testing.T, matches map[string]any, modelKey string) map[string]any {
+	t.Helper()
+	models, _ := matches["models"].([]any)
+	for _, entry := range models {
+		m, _ := entry.(map[string]any)
+		if m["key"] != modelKey {
+			continue
+		}
+		closest, ok := m["closest"].(map[string]any)
+		if !ok {
+			t.Fatalf("%s has no closest match: %v", modelKey, m)
+		}
+		return closest
+	}
+	t.Fatalf("no ranking for %s in %v", modelKey, matches)
+	return nil
+}

@@ -140,6 +140,48 @@ type Vote struct {
 	CreatedAt time.Time `json:"createdAt"`
 }
 
+// Member positions as the House and Senate record them. Present and Not
+// Voting are kept rather than dropped so that "took no side" can be told apart
+// from "was not asked", but neither counts toward an agreement rate.
+const (
+	PositionYea       = "Yea"
+	PositionNay       = "Nay"
+	PositionPresent   = "Present"
+	PositionNotVoting = "Not Voting"
+)
+
+// MemberVote is how one member of Congress voted on one bill on the floor.
+// Bioguide is the member's Biographical Directory ID, which is the identity
+// the contender roster is keyed by.
+type MemberVote struct {
+	BillID    string    `json:"billId"`
+	Bioguide  string    `json:"bioguide"`
+	Chamber   string    `json:"chamber"`
+	Position  string    `json:"position"`
+	RollCall  string    `json:"rollCall,omitempty"`
+	Question  string    `json:"question,omitempty"`
+	SourceURL string    `json:"sourceUrl,omitempty"`
+	VotedAt   time.Time `json:"votedAt"`
+}
+
+// Decided reports whether the member took a side an agreement rate can be
+// computed from.
+func (m MemberVote) Decided() bool {
+	return m.Position == PositionYea || m.Position == PositionNay
+}
+
+// Agrees reports whether a member's position matches a model's verdict. Only
+// binary against binary counts; anything else is not a comparison.
+func (m MemberVote) Agrees(vote string) bool {
+	switch {
+	case m.Position == PositionYea && vote == VoteYes:
+		return true
+	case m.Position == PositionNay && vote == VoteNo:
+		return true
+	}
+	return false
+}
+
 // Deliberation is the pros/cons memo one model wrote for one bill before
 // voting on it, plus the section notes it took if the statute text was too
 // large to read in one pass. Every field here is private to a single model:
