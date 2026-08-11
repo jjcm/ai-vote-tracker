@@ -85,8 +85,47 @@ CREATE TABLE IF NOT EXISTS deliberations (
     FOREIGN KEY (bill_id) REFERENCES bills(id) ON DELETE CASCADE
 );
 
+-- How one member of Congress voted on the floor on one bill. Only members on
+-- the 2028 watch list are stored: this table exists to compare models against
+-- them, not to mirror the Clerk. A member can be recorded on the same bill
+-- twice — passage, then concurring in the other chamber's text — and the later
+-- vote is the one kept, so the row is keyed by bill and member.
+CREATE TABLE IF NOT EXISTS member_votes (
+    bill_id   TEXT NOT NULL,
+    bioguide  TEXT NOT NULL,
+    chamber   TEXT NOT NULL DEFAULT '',
+    position  TEXT NOT NULL,
+    roll_call TEXT NOT NULL DEFAULT '',
+    question  TEXT NOT NULL DEFAULT '',
+    source_url TEXT NOT NULL DEFAULT '',
+    voted_at  INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (bill_id, bioguide)
+);
+
+-- Roll calls whose member positions have already been read, so a backfill that
+-- runs again does not download them a second time.
+CREATE TABLE IF NOT EXISTS roll_calls (
+    id         TEXT PRIMARY KEY,
+    chamber    TEXT NOT NULL DEFAULT '',
+    bill_id    TEXT NOT NULL DEFAULT '',
+    question   TEXT NOT NULL DEFAULT '',
+    voted_at   INTEGER NOT NULL DEFAULT 0,
+    members    INTEGER NOT NULL DEFAULT 0,
+    fetched_at INTEGER NOT NULL DEFAULT 0
+);
+
+-- The computed model-to-member agreement table, cached against a signature of
+-- the model verdicts and member votes it was derived from. A change to either
+-- changes the signature, which is what makes the entry stale.
+CREATE TABLE IF NOT EXISTS contender_matches (
+    signature  TEXT PRIMARY KEY,
+    payload    TEXT NOT NULL,
+    created_at INTEGER NOT NULL DEFAULT 0
+);
+
 CREATE INDEX IF NOT EXISTS idx_bills_updated ON bills(updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_votes_model ON votes(model_key);
+CREATE INDEX IF NOT EXISTS idx_member_votes_member ON member_votes(bioguide);
 `
 
 // Open creates (or opens) the database at path, applies the schema, and
@@ -566,6 +605,149 @@ func (s *Store) BillIDsMissingVotes(ctx context.Context) ([]string, error) {
 		}
 	}
 	return out, nil
+}
+
+// SaveMemberVote records one member's floor position on one bill. A member can
+// be recorded on the same bill more than once — passage and then concurring in
+// the other chamber's amendment — and the later roll call is the one that
+// stands, so an older one never overwrites a newer one.
+func (s *Store) SaveMemberVote(ctx context.Context, v models.MemberVote) error {
+	_, err := s.db.ExecContext(ctx, `
+INSERT INTO member_votes (bill_id, bioguide, chamber, position, roll_call, question, source_url, voted_at)
+VALUES (?,?,?,?,?,?,?,?)
+ON CONFLICT(bill_id, bioguide) DO UPDATE SET
+    chamber=excluded.chamber,
+    position=excluded.position,
+    roll_call=excluded.roll_call,
+    question=excluded.question,
+    source_url=excluded.source_url,
+    voted_at=excluded.voted_at
+WHERE excluded.voted_at >= member_votes.voted_at`,
+		v.BillID, v.Bioguide, v.Chamber, v.Position, v.RollCall, v.Question, v.SourceURL, unix(v.VotedAt))
+	return err
+}
+
+// MemberVotes returns every stored floor position.
+func (s *Store) MemberVotes(ctx context.Context) ([]models.MemberVote, error) {
+	rows, err := s.db.QueryContext(ctx, `
+SELECT bill_id, bioguide, chamber, position, roll_call, question, source_url, voted_at
+FROM member_votes ORDER BY voted_at DESC, bill_id ASC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []models.MemberVote
+	for rows.Next() {
+		var v models.MemberVote
+		var votedAt int64
+		if err := rows.Scan(&v.BillID, &v.Bioguide, &v.Chamber, &v.Position, &v.RollCall,
+			&v.Question, &v.SourceURL, &votedAt); err != nil {
+			return nil, err
+		}
+		v.VotedAt = fromUnix(votedAt)
+		out = append(out, v)
+	}
+	return out, rows.Err()
+}
+
+// DeleteMemberVotesForBills drops the stored positions for bills that are no
+// longer in the corpus, so a shrinking window does not leave orphans behind.
+func (s *Store) DeleteMemberVotesForBills(ctx context.Context) (int, error) {
+	res, err := s.db.ExecContext(ctx,
+		`DELETE FROM member_votes WHERE bill_id NOT IN (SELECT id FROM bills)`)
+	if err != nil {
+		return 0, err
+	}
+	n, err := res.RowsAffected()
+	return int(n), err
+}
+
+// RollCall is the record that one roll call's member positions have been read.
+type RollCall struct {
+	ID       string
+	Chamber  string
+	BillID   string
+	Question string
+	VotedAt  time.Time
+	Members  int
+}
+
+// SaveRollCall marks a roll call as ingested.
+func (s *Store) SaveRollCall(ctx context.Context, rc RollCall) error {
+	_, err := s.db.ExecContext(ctx, `
+INSERT INTO roll_calls (id, chamber, bill_id, question, voted_at, members, fetched_at)
+VALUES (?,?,?,?,?,?,?)
+ON CONFLICT(id) DO UPDATE SET
+    chamber=excluded.chamber, bill_id=excluded.bill_id, question=excluded.question,
+    voted_at=excluded.voted_at, members=excluded.members, fetched_at=excluded.fetched_at`,
+		rc.ID, rc.Chamber, rc.BillID, rc.Question, unix(rc.VotedAt), rc.Members,
+		time.Now().UTC().Unix())
+	return err
+}
+
+// KnownRollCalls returns the ids of roll calls already read.
+func (s *Store) KnownRollCalls(ctx context.Context) (map[string]bool, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id FROM roll_calls`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]bool{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out[id] = true
+	}
+	return out, rows.Err()
+}
+
+// ContenderInputs is the shape of the data an agreement table was computed
+// from: enough to tell a cached table from a stale one without recomputing it.
+type ContenderInputs struct {
+	ModelVotes    int
+	ModelVotesAt  int64
+	MemberVotes   int
+	MemberVotesAt int64
+}
+
+// ContenderInputs summarises the model verdicts and member positions on hand.
+func (s *Store) ContenderInputs(ctx context.Context) (ContenderInputs, error) {
+	var in ContenderInputs
+	err := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*), COALESCE(MAX(created_at), 0) FROM votes`).Scan(&in.ModelVotes, &in.ModelVotesAt)
+	if err != nil {
+		return in, err
+	}
+	err = s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*), COALESCE(MAX(voted_at), 0) FROM member_votes`).Scan(&in.MemberVotes, &in.MemberVotesAt)
+	return in, err
+}
+
+// CachedContenders returns the agreement table stored under a signature.
+func (s *Store) CachedContenders(ctx context.Context, signature string) ([]byte, error) {
+	var payload string
+	err := s.db.QueryRowContext(ctx,
+		`SELECT payload FROM contender_matches WHERE signature = ?`, signature).Scan(&payload)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	return []byte(payload), err
+}
+
+// SaveContenders caches an agreement table, dropping the entries computed from
+// data that has since moved on. Only the current signature is worth keeping:
+// nothing ever asks for an older one.
+func (s *Store) SaveContenders(ctx context.Context, signature string, payload []byte) error {
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM contender_matches WHERE signature <> ?`, signature); err != nil {
+		return err
+	}
+	_, err := s.db.ExecContext(ctx, `
+INSERT INTO contender_matches (signature, payload, created_at) VALUES (?,?,?)
+ON CONFLICT(signature) DO UPDATE SET payload=excluded.payload, created_at=excluded.created_at`,
+		signature, string(payload), time.Now().UTC().Unix())
+	return err
 }
 
 // BillsNeedingIdeology lists bills whose ideology score has not been set.
