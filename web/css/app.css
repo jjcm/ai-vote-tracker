@@ -578,10 +578,13 @@ main {
   width: 6.5rem;
 }
 
-.ledger .col-updated {
+.ledger td.col-updated {
   white-space: nowrap;
   color: var(--ink-muted);
   font-size: 0.95rem;
+}
+
+.ledger .col-updated {
   width: 7.5rem;
 }
 
