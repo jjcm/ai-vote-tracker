@@ -307,12 +307,21 @@ func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusAccepted, map[string]any{"refreshing": true})
 }
 
+// loadAll returns every bill with its verdicts. The statutory text is dropped:
+// it is only useful to the models, and it would dominate the list payloads.
 func (s *Server) loadAll(ctx context.Context) ([]models.BillWithVotes, error) {
 	bills, err := s.store.Bills(ctx)
 	if err != nil {
 		return nil, err
 	}
-	return s.store.WithVotes(ctx, bills)
+	decorated, err := s.store.WithVotes(ctx, bills)
+	if err != nil {
+		return nil, err
+	}
+	for i := range decorated {
+		decorated[i].FullText = ""
+	}
+	return decorated, nil
 }
 
 func matches(b models.BillWithVotes, q string) bool {

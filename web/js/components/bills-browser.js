@@ -235,7 +235,7 @@ function detailRow(bill, columns) {
           const v = byModel.get(m.key);
           return `<td class="col-vote"><vote-badge vote="${v ? v.vote : 'Pending'}" model="${escapeHTML(
             m.name
-          )}" size="21" label></vote-badge></td>`;
+          )}" size="24" label></vote-badge></td>`;
         })
         .join('')}
       <td class="col-updated">${formatDate(bill.updatedAt)}</td>

@@ -84,14 +84,24 @@ func (c *Client) RecentBills(ctx context.Context, limit int) ([]models.Bill, err
 		limit = 12
 	}
 
-	// Over-fetch: the feed contains repeat summaries for the same bill and a
-	// fair number of ceremonial resolutions.
+	// Without fromDateTime the feed only returns the handful of summaries
+	// updated in the last few hours, so widen the window until there is enough
+	// non-ceremonial legislation to fill the page.
 	var feed summariesResponse
-	if err := c.get(ctx, "/summaries", url.Values{
-		"sort":  {"updateDate desc"},
-		"limit": {"250"},
-	}, &feed); err != nil {
-		return nil, err
+	for _, window := range []time.Duration{45 * 24 * time.Hour, 180 * 24 * time.Hour, 3 * 365 * 24 * time.Hour} {
+		var page summariesResponse
+		err := c.get(ctx, "/summaries", url.Values{
+			"sort":         {"updateDate desc"},
+			"limit":        {"250"},
+			"fromDateTime": {time.Now().UTC().Add(-window).Format("2006-01-02T15:04:05Z")},
+		}, &page)
+		if err != nil {
+			return nil, err
+		}
+		feed = page
+		if countLegislation(page) >= limit {
+			break
+		}
 	}
 
 	seen := map[string]bool{}
@@ -110,7 +120,7 @@ func (c *Client) RecentBills(ctx context.Context, limit int) ([]models.Bill, err
 			continue
 		}
 		summary := stripHTML(s.Text)
-		if len(summary) < 120 {
+		if len(summary) < 120 || isCommemorative(b.Title) {
 			continue
 		}
 		seen[id] = true
@@ -165,6 +175,40 @@ func (c *Client) RecentBills(ctx context.Context, limit int) ([]models.Bill, err
 		return nil, fmt.Errorf("congress: no usable bills in the summaries feed")
 	}
 	return out, nil
+}
+
+// isCommemorative filters out post office namings and similar bills, which
+// carry no policy content for a model to weigh.
+func isCommemorative(title string) bool {
+	t := strings.ToLower(title)
+	for _, marker := range []string{
+		"designate the facility of the united states postal service",
+		"to name the department of veterans affairs",
+		"congressional gold medal",
+		"commemorative coin",
+	} {
+		if strings.Contains(t, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+// countLegislation counts distinct House/Senate bills with a usable summary,
+// ignoring the ceremonial resolutions that dominate the feed.
+func countLegislation(feed summariesResponse) int {
+	seen := map[string]bool{}
+	for _, s := range feed.Summaries {
+		t := strings.ToUpper(s.Bill.Type)
+		if t != "HR" && t != "S" {
+			continue
+		}
+		if len(stripHTML(s.Text)) < 120 || isCommemorative(s.Bill.Title) {
+			continue
+		}
+		seen[fmt.Sprintf("%s-%s-%d", t, s.Bill.Number, s.Bill.Congress)] = true
+	}
+	return len(seen)
 }
 
 func (c *Client) billDetail(ctx context.Context, congress int, billType, number string) (billResponse, error) {

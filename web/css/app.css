@@ -573,9 +573,9 @@ main {
 }
 
 .ledger .col-go {
-  width: 2.4rem;
+  width: 2.6rem;
   text-align: right;
-  color: var(--ink-faint);
+  color: var(--ink-muted);
 }
 
 .bill-number {
@@ -641,7 +641,7 @@ a.bill-number:hover {
 
 .row-go {
   display: inline-flex;
-  color: var(--ink-faint);
+  color: var(--ink-muted);
 }
 
 .row-go:hover {

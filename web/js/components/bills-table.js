@@ -66,7 +66,7 @@ function row(bill, models) {
           const v = byModel.get(m.key);
           return `<td class="col-vote"><vote-badge vote="${v ? v.vote : 'Pending'}" model="${escapeHTML(
             m.name
-          )}" size="21"></vote-badge></td>`;
+          )}" size="24"></vote-badge></td>`;
         })
         .join('')}
       <td class="col-updated">${formatDate(bill.updatedAt)}</td>

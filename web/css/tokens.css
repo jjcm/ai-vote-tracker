@@ -35,8 +35,8 @@
   --font-serif: "EB Garamond", "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
   --font-sans: "Inter", "Helvetica Neue", Helvetica, Arial, sans-serif;
 
-  --fs-hero: clamp(2.75rem, 5.9vw, 5.25rem);
-  --fs-page-title: clamp(2.5rem, 5.4vw, 4.75rem);
+  --fs-hero: clamp(2.75rem, 6.3vw, 5.7rem);
+  --fs-page-title: clamp(2.5rem, 5.6vw, 5rem);
   --fs-verdict: clamp(2.3rem, 4.8vw, 4.25rem);
   --fs-h2: clamp(1.5rem, 2.35vw, 2rem);
   --fs-lead: clamp(1.1rem, 1.65vw, 1.45rem);
