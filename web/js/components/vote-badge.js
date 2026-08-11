@@ -108,7 +108,7 @@ function memo(vote) {
   if (!pros.length && !cons.length) return '';
   return `
     <details class="verdict__memo">
-      <summary>Its reasoning</summary>
+      <summary>For &amp; Against</summary>
       ${list('For', pros)}
       ${list('Against', cons)}
     </details>`;

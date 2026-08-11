@@ -327,8 +327,13 @@ func (c *Client) readBills(ctx context.Context, feed summariesResponse, want int
 		if attempted[id] {
 			continue
 		}
-		summary := stripHTML(s.Text)
-		if len(summary) < 120 || isCommemorative(b.Title) {
+		// The CRS summary opens with the bill's short title as its own
+		// paragraph, which the card prints directly above it. Drop that echo
+		// before clipping, so the card's character budget goes to the summary
+		// rather than to a repeat of the headline.
+		title := strings.TrimSpace(b.Title)
+		summary := models.SummaryWithoutTitleEcho(title, stripHTML(s.Text))
+		if len(summary) < 120 || isCommemorative(title) {
 			continue
 		}
 		attempted[id] = true
@@ -353,7 +358,7 @@ func (c *Client) readBills(ctx context.Context, feed summariesResponse, want int
 		bill := models.Bill{
 			ID:          id,
 			Number:      display,
-			Title:       strings.TrimSpace(b.Title),
+			Title:       title,
 			Chamber:     chamber,
 			Summary:     shorten(summary, 460),
 			FullText:    text.Text,

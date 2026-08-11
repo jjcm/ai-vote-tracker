@@ -1,4 +1,6 @@
 import { api, escapeHTML, formatDate, cleanTitle } from '../api.js';
+import { modelMark } from '../icons.js';
+import { billHref, wireRowLinks } from './row-link.js';
 
 /**
  * Compact latest-bills table on the homepage: one vote glyph per model, no
@@ -38,7 +40,7 @@ class LatestBills extends HTMLElement {
               <th scope="col" class="col-bill">Bill</th>
               <th scope="col" class="col-title">Title</th>
               <th scope="col" class="col-chamber">Chamber</th>
-              ${models.map((m) => `<th scope="col" class="col-vote">${escapeHTML(m.name)}</th>`).join('')}
+              ${models.map((m) => `<th scope="col" class="col-vote">${modelHead(m)}</th>`).join('')}
               <th scope="col" class="col-updated">Updated</th>
             </tr>
           </thead>
@@ -47,16 +49,22 @@ class LatestBills extends HTMLElement {
           </tbody>
         </table>
       </div>`;
+
+    wireRowLinks(this);
   }
+}
+
+/** Brand glyph above the model name, so the vote columns read at a glance. */
+function modelHead(model) {
+  return `<span class="col-vote__model">${modelMark(model.key, 18)}<span>${escapeHTML(model.name)}</span></span>`;
 }
 
 function row(bill, models) {
   const byModel = new Map(bill.votes.map((v) => [v.modelKey, v]));
+  const href = billHref(bill.id);
   return `
-    <tr>
-      <td class="col-bill"><a class="bill-number" href="/bills?q=${encodeURIComponent(bill.number)}">${escapeHTML(
-        bill.number
-      )}</a></td>
+    <tr class="row-link" data-href="${escapeHTML(href)}">
+      <td class="col-bill"><a class="bill-number" href="${escapeHTML(href)}">${escapeHTML(bill.number)}</a></td>
       <td class="col-title">${escapeHTML(cleanTitle(bill.title, bill.number))}</td>
       <td class="col-chamber"><span class="chamber chamber--${bill.chamber.toLowerCase()}">${escapeHTML(
         bill.chamber
